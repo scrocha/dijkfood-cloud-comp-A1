@@ -11,7 +11,7 @@ NUM_USUARIOS = 1000
 NUM_ENTREGADORES = 3000
 NUM_RESTAURANTES = 100
 
-DB_HOST = "localhost" # trocar pelo endpoint do rds
+DB_HOST = "localhost" # o deploy troca os valores automaticamente
 DB_NAME = "dijkfood"
 DB_USER = "postgres" # o deploy troca os valores automaticamente
 DB_PASS = "postgres" # o deploy troca os valores automaticamente
