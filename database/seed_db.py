@@ -4,6 +4,7 @@ from faker import Faker
 import random
 import uuid
 import osmnx as ox
+import os
 
 fake = Faker('pt_BR') # inicializa o faker
 
@@ -11,11 +12,12 @@ NUM_USUARIOS = 1000
 NUM_ENTREGADORES = 3000
 NUM_RESTAURANTES = 100
 
-DB_HOST = "localhost" # o deploy troca os valores automaticamente
-DB_NAME = "dijkfood"
-DB_USER = "postgres" # o deploy troca os valores automaticamente
-DB_PASS = "postgres" # o deploy troca os valores automaticamente
-SCHEMA = "dijkfood_schema"
+# o deploy troca os valores automaticamente para conexão no RDS
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_NAME = os.getenv("DB_NAME", "dijkfood")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASS = os.getenv("DB_PASS", "postgres")
+SCHEMA = os.getenv("SCHEMA", "dijkfood_schema")
 
 TIPOS_COZINHA = ["Italiana", "Japonesa", "Brasileira", "Hamburgueria", "Mexicana"]
 TIPOS_VEICULO = ["Moto", "Bicicleta", "Carro"]
