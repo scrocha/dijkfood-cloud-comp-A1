@@ -1,11 +1,14 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Dict
 
+LATITUDE_RANGE = (-23.9857223, -23.3590754)
+LONGITUDE_RANGE = (-46.8253578, -46.3653906)
+
 class Ponto(BaseModel):
     model_config = ConfigDict(extra="ignore") 
     
-    lat: float = Field(..., ge=-90, le=90, description="Latitude")
-    lon: float = Field(..., ge=-180, le=180, description="Longitude")
+    lat: float = Field(..., ge=LATITUDE_RANGE[0], le=LATITUDE_RANGE[1], description="Latitude")
+    lon: float = Field(..., ge=LONGITUDE_RANGE[0], le=LONGITUDE_RANGE[1], description="Longitude")
 
 class EntregadorRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
