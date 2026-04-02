@@ -71,7 +71,10 @@ def startup_optimization():
 startup_optimization()
 
 app = FastAPI(
-    title="DijkFood API - Serviço de Rotas"
+    title="DijkFood API - Serviço de Rotas",
+    docs_url="/rotas/docs",
+    redoc_url="/rotas/redoc",
+    openapi_url="/rotas/openapi.json"
 )
 
 # --- Funções de Roteamento e Busca ---
