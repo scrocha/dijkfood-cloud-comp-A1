@@ -23,7 +23,9 @@ RUN uv sync --no-dev --no-install-project --frozen
 
 # 5. Copiar o código e instalar o projeto
 COPY route_service/ /app/route_service/
-RUN uv pip install --system --no-deps .
+
+RUN uv run route_service/download_graph.py && rm -rf /tmp/* && \
+    rm -f /app/route_service/grafo_sp.graphml
 
 EXPOSE 8000
 
