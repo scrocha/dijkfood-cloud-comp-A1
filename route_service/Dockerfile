@@ -27,6 +27,6 @@ COPY route_service/ /app/route_service/
 RUN uv run route_service/download_graph.py && rm -rf /tmp/* && \
     rm -f /app/route_service/grafo_sp.graphml
 
-EXPOSE 8000
+EXPOSE 8001
 
-CMD ["uvicorn", "route_service.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "route_service.api:app", "--host", "0.0.0.0", "--port", "8001"]

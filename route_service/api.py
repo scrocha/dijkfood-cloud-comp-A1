@@ -158,7 +158,7 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
         "destino_projetado": ponto_destino_proj
     }
 
-@app.post("/entregador-mais-proximo", response_model=EntregadorResponse)
+@app.post("/rotas/entregador-mais-proximo", response_model=EntregadorResponse)
 async def entregador_mais_proximo(req: EntregadorRequest):
     top_n_indices = await asyncio.to_thread(
         encontrar_top_n_entregadores, req.restaurante, req.entregadores, n=5
@@ -189,7 +189,7 @@ async def entregador_mais_proximo(req: EntregadorRequest):
         "rota_ao_restaurante": melhor_rota
     }
 
-@app.post("/rota-entrega", response_model=RotaEntregaResponse)
+@app.post("/rotas/rota-entrega", response_model=RotaEntregaResponse)
 async def rota_entrega(req: RotaRequest):
     rota = await calcular_rota_async(req.origem, req.destino)
     
@@ -202,7 +202,7 @@ async def rota_entrega(req: RotaRequest):
         "dados_rota": rota
     }
 
-@app.get("/health")
+@app.get("/rotas/health")
 def health():
     return {
         "status": "ok", 
