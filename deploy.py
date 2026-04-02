@@ -446,14 +446,20 @@ def destroy_infrastructure():
         for svc in services:
             try:
                 res = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[svc])
-                if res['services'] and res['services'][0]['status'] != 'INACTIVE':
+                if res['services'] and res['services'][0]['status'] not in ['INACTIVE', 'DRAINING']:
                     actual_services.append(svc)
             except Exception:
                 pass
 
         if actual_services:
-            waiter = ecs_client.get_waiter('services_stable')
-            waiter.wait(cluster=CLUSTER_NAME, services=actual_services)
+            print(f"Aguardando interrupção dos serviços: {actual_services}")
+            # Aguarda até que runningCount seja 0 ou max_attempts
+            for _ in range(30):
+                res = ecs_client.describe_services(cluster=CLUSTER_NAME, services=actual_services)
+                if all(s['runningCount'] == 0 for s in res['services']):
+                    break
+                time.sleep(10)
+
             for svc in actual_services:
                 ecs_client.delete_service(cluster=CLUSTER_NAME, service=svc)
         
