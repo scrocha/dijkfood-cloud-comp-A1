@@ -5,10 +5,10 @@ from pathlib import Path
 
 
 AWS_REGION = "us-east-1"
-CLUSTER_NAME = "dijkfood-route-cluster"
-TASK_FAMILY = "dijkfood-route-task"
-REPO_NAME = "dijkfood-route-api"
-SG_NAME = "dijkfood-route-sg"
+CLUSTER_NAME = "dijkfood-cluster"
+TASK_FAMILY = "dijkfood-rotas-task"
+REPO_NAME = "dijkfood-api-rotas"
+SG_NAME = "dijkfood-sg-unified"
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -103,7 +103,7 @@ def deploy_to_ecs(ecr_uri, sg_id):
         containerDefinitions=[{
             "name": "route-api-container",
             "image": f"{ecr_uri}:latest",
-            "portMappings": [{"containerPort": 8000, "hostPort": 8000}],
+            "portMappings": [{"containerPort": 8001, "hostPort": 8001}],
             "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
@@ -145,7 +145,7 @@ def deploy_to_ecs(ecr_uri, sg_id):
     eni_details = ec2_client.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
     public_ip = eni_details['NetworkInterfaces'][0]['Association']['PublicIp']
 
-    print(f"API de Rotas Online. IP Público: http://{public_ip}:8000")
+    print(f"API de Rotas Online. IP Público: http://{public_ip}:8001/rotas/health")
     return public_ip, task_arn
 
 
@@ -189,6 +189,6 @@ if __name__ == "__main__":
     ecr_uri = build_and_push_docker_image()
     public_ip, _ = deploy_to_ecs(ecr_uri, sg_id)
     
-    print(f"Deploy finalizado com sucesso. Acesse: http://{public_ip}:8000/health")
+    print(f"Deploy finalizado com sucesso. Acesse: http://{public_ip}:8001/rotas/health")
 
     # destroy_infrastructure()
