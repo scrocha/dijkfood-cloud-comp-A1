@@ -106,5 +106,4 @@ venv.bak/
 .cursorindexingignore
 
 # Grafo e cache global
-*.graphml
 cache/
