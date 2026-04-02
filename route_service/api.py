@@ -1,13 +1,13 @@
 import os
 import math
-import boto3
 import gc
-import osmnx as ox
+import pickle
 import networkx as nx
 import numpy as np
 import asyncio
 from functools import lru_cache
 from scipy.spatial import cKDTree
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from typing import Any, Dict, Tuple, List, Optional
@@ -17,12 +17,11 @@ from route_service.models import (
     EntregadorResponse, RotaEntregaResponse
 )
 
-GRAPH_FILE_NAME = "grafo_sp.graphml"
-AWS_BUCKET_NAME = "grafo-dijkfood-sp-1"
-AWS_REGION = "us-east-1"
+_DIR = Path(__file__).parent
+
+PKL_FILE_NAME = _DIR / "grafo_sp.pkl"
 EDGE_WEIGHT = "length"
 
-# --- Estruturas de Dados Globais Otimizadas ---
 GLOBAL_GRAPH: nx.DiGraph = None
 GLOBAL_NODE_COORDS: Dict[int, Tuple[float, float]] = {}
 GLOBAL_TREE: cKDTree = None
@@ -31,46 +30,42 @@ GLOBAL_NODE_IDS: np.ndarray = None
 def startup_optimization():
     global GLOBAL_GRAPH, GLOBAL_NODE_COORDS, GLOBAL_TREE, GLOBAL_NODE_IDS
 
-    if not os.path.exists(GRAPH_FILE_NAME):
-        print("Baixando grafo do S3")
-        s3 = boto3.client("s3", region_name=AWS_REGION)
-        s3.download_file(AWS_BUCKET_NAME, GRAPH_FILE_NAME, GRAPH_FILE_NAME)
-            
-    multi_g = ox.load_graphml(GRAPH_FILE_NAME)
-    
-    print("Grafo carregado")
+    if not PKL_FILE_NAME.exists():
+        from route_service.download_graph import preparar_dados
+        preparar_dados()
+
+    print(f"Carregando dados")
+    with open(PKL_FILE_NAME, "rb") as f:
+        dados = pickle.load(f)
 
     GLOBAL_GRAPH = nx.DiGraph()
+    GLOBAL_NODE_COORDS = dados["nos"]
     
     coords_for_tree = []
     node_ids_list = []
     
-    for node_id, data in multi_g.nodes(data=True):
-        lat, lon = data['y'], data['x']
+    # 1. Popula os Nós e prepara dados para a KD-Tree
+    for node_id, (lat, lon) in GLOBAL_NODE_COORDS.items():
         GLOBAL_GRAPH.add_node(node_id)
-        GLOBAL_NODE_COORDS[node_id] = (lat, lon)
         coords_for_tree.append([lat, lon])
         node_ids_list.append(node_id)
 
-    for u, v, data in multi_g.edges(data=True):
-        w = data.get(EDGE_WEIGHT, float('inf'))
-        if isinstance(w, list): 
-            w = min(w)
-        w = float(w)
-        
-        if GLOBAL_GRAPH.has_edge(u, v):
-            GLOBAL_GRAPH[u][v][EDGE_WEIGHT] = min(GLOBAL_GRAPH[u][v][EDGE_WEIGHT], w)
-        else:
-            GLOBAL_GRAPH.add_edge(u, v, **{EDGE_WEIGHT: w})
-    print("Grafo convertido para NetworkX")
+    # 2. Popula as Arestas
+    for u, v, w in dados["arestas"]:
+        GLOBAL_GRAPH.add_edge(u, v, **{EDGE_WEIGHT: w})
+
+    print("Grafo montado em memória com sucesso.")
 
     GLOBAL_TREE = cKDTree(np.array(coords_for_tree, dtype=np.float32))
     GLOBAL_NODE_IDS = np.array(node_ids_list)
 
     print("Árvore KD-Tree construída para busca de nós mais próximos")
 
-    del multi_g
+    del dados
+    del coords_for_tree
+    del node_ids_list
     gc.collect()
+    
     print("Api pronta para receber requisições")
 
 startup_optimization()
@@ -81,7 +76,7 @@ app = FastAPI(
 
 # --- Funções de Roteamento e Busca ---
 
-@lru_cache(maxsize=50000)
+@lru_cache(maxsize=5000)
 def obter_no_mais_proximo_cache(lat_rnd: float, lon_rnd: float) -> int:
     _, idx = GLOBAL_TREE.query([lat_rnd, lon_rnd])
     return GLOBAL_NODE_IDS[idx]
