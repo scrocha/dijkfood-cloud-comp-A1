@@ -1,5 +1,5 @@
-import psycopg2
-from psycopg2.extras import execute_values
+import asyncio
+import httpx
 from faker import Faker
 import random
 import uuid
@@ -8,16 +8,11 @@ import os
 
 fake = Faker('pt_BR') # inicializa o faker
 
-NUM_USUARIOS = 1000
-NUM_ENTREGADORES = 3000
-NUM_RESTAURANTES = 100
+NUM_USUARIOS = 50000
+NUM_ENTREGADORES = 150000
+NUM_RESTAURANTES = 5000
 
-# o deploy troca os valores automaticamente para conexão no RDS
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_NAME = os.getenv("DB_NAME", "dijkfood")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "postgres")
-SCHEMA = os.getenv("SCHEMA", "dijkfood_schema")
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 TIPOS_COZINHA = ["Italiana", "Japonesa", "Brasileira", "Hamburgueria", "Mexicana"]
 TIPOS_VEICULO = ["Moto", "Bicicleta", "Carro"]
@@ -61,76 +56,55 @@ CARDAPIO = {
     ]
 }
 
-BATCH_SIZE = 10000 # tamanho do batch de inserção
+BATCH_SIZE = 500
 
 def gerar_coordenadas_validas_sp(quantidade):
     print("Baixando fronteiras de São Paulo...")
-
-    # busca geometria da cidade
     sp_gdf = ox.geocode_to_gdf("São Paulo, São Paulo, Brazil")
 
     print(f"Gerando {quantidade} pontos aleatórios...")
-    # O geopandas tem uma função nativa e ultrarrápida para gerar os pontos no polígono
     amostra = sp_gdf.geometry.sample_points(quantidade)
-
-    # O resultado é uma coleção de pontos (MultiPoint). Vamos extraí-los:
     multiponto = amostra.iloc[0]
-    
-    # Converte para tuplas (latitude, longitude)
     coordenadas = [(ponto.y, ponto.x) for ponto in multiponto.geoms]
     
     print("Coordenadas geradas com sucesso!")
     return coordenadas
 
-COORDENADAS = iter(gerar_coordenadas_validas_sp(NUM_USUARIOS + NUM_ENTREGADORES + NUM_RESTAURANTES))
+# Variável p/ as coordenadas (será instanciada no main)
+COORDENADAS = None
 
-def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST,
-        database=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS
-    )
+async def send_batch(client, endpoint, payload):
+    try:
+        resp = await client.post(f"{API_URL}{endpoint}", json=payload, timeout=60.0)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Erro ao enviar para {endpoint}: {e}")
 
-def seed_usuarios(cursor, total):
-    print(f"Gerando {total} usuários em lotes de {BATCH_SIZE}...")
-
-    query = f"""
-        INSERT INTO {SCHEMA}.USUARIO 
-        (USER_ID, PRIMEIRO_NOME, ULTIMO_NOME, EMAIL, TELEFONE, SENHA, DATA_NASCIMENTO, ENDERECO_LATITUDE, ENDERECO_LONGITUDE) 
-        VALUES %s
-    """
+async def seed_usuarios(client, total):
+    print(f"Gerando {total} usuários em lotes de {BATCH_SIZE} por API...")
     
     for batch_start in range(0, total, BATCH_SIZE):
         batch_data = []
 
         for _ in range(min(BATCH_SIZE, total - batch_start)):
             lat, lon = next(COORDENADAS)
+            batch_data.append({
+                "user_id": str(uuid.uuid4()),
+                "primeiro_nome": fake.first_name(),
+                "ultimo_nome": fake.last_name(),
+                "email": fake.unique.email(),
+                "telefone": fake.phone_number()[:20],
+                "senha": fake.password(),
+                "data_nascimento": str(fake.date_of_birth(minimum_age=18, maximum_age=80)),
+                "endereco_latitude": lat,
+                "endereco_longitude": lon
+            })
 
-            batch_data.append((
-                str(uuid.uuid4()),
-                fake.first_name(),
-                fake.last_name(),
-                fake.unique.email(),
-                fake.phone_number()[:20],
-                fake.password(),
-                fake.date_of_birth(minimum_age=18, maximum_age=80),
-                lat,
-                lon
-            ))
-
-        execute_values(cursor, query, batch_data)
+        await send_batch(client, "/usuarios/batch", batch_data)
         print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
 
-def seed_restaurantes(cursor, total):
-    print(f"Gerando {total} restaurantes em lotes de {BATCH_SIZE}...")
-
-    query = f"""
-        INSERT INTO {SCHEMA}.RESTAURANTE 
-        (REST_ID, NOME, TIPO_COZINHA, ENDERECO_LATITUDE, ENDERECO_LONGITUDE) 
-        VALUES %s
-    """
-
+async def seed_restaurantes(client, total):
+    print(f"Gerando {total} restaurantes em lotes de {BATCH_SIZE} por API...")
     rest_ids = []
     cozinhas = []
 
@@ -144,27 +118,21 @@ def seed_restaurantes(cursor, total):
             cozinha = random.choice(TIPOS_COZINHA)
             cozinhas.append(cozinha)
 
-            batch_data.append((
-                novo_rest_id,
-                fake.company(),
-                cozinha,
-                lat,
-                lon
-            ))
+            batch_data.append({
+                "rest_id": novo_rest_id,
+                "nome": fake.company(),
+                "tipo_cozinha": cozinha,
+                "endereco_latitude": lat,
+                "endereco_longitude": lon
+            })
 
-        execute_values(cursor, query, batch_data)
+        await send_batch(client, "/restaurantes/batch", batch_data)
         print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
 
     return rest_ids, cozinhas
 
-def seed_entregadores(cursor, total):
-    print(f"Gerando {total} entregadores em lotes de {BATCH_SIZE}...")
-
-    query = f"""
-        INSERT INTO {SCHEMA}.ENTREGADOR 
-        (ENTREGADOR_ID, NOME, TIPO_VEICULO, ENDERECO_LATITUDE, ENDERECO_LONGITUDE) 
-        VALUES %s
-    """
+async def seed_entregadores(client, total):
+    print(f"Gerando {total} entregadores em lotes de {BATCH_SIZE} por API...")
     
     for batch_start in range(0, total, BATCH_SIZE):
         batch_data = []
@@ -172,73 +140,57 @@ def seed_entregadores(cursor, total):
         for _ in range(min(BATCH_SIZE, total - batch_start)):
             lat, lon = next(COORDENADAS)
 
-            batch_data.append((
-                str(uuid.uuid4()),
-                fake.name(),
-                random.choice(TIPOS_VEICULO),
-                lat,
-                lon
-            ))
+            batch_data.append({
+                "entregador_id": str(uuid.uuid4()),
+                "nome": fake.name(),
+                "tipo_veiculo": random.choice(TIPOS_VEICULO),
+                "endereco_latitude": lat,
+                "endereco_longitude": lon
+            })
 
-        execute_values(cursor, query, batch_data)
+        await send_batch(client, "/entregadores/batch", batch_data)
         print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
 
-def seed_produtos(cursor, rest_ids, cozinhas):
-    print(f"Gerando produtos para {len(rest_ids)} restaurantes...")
-    
-    query = f"""
-        INSERT INTO {SCHEMA}.PRODUTOS 
-        (PROD_ID, NOME, REST_ID) 
-        VALUES %s
-    """
-    
+async def seed_produtos(client, rest_ids, cozinhas):
+    print(f"Gerando produtos para {len(rest_ids)} restaurantes via API...")
     batch_data = []
     total_inseridos = 0
 
     for rest_id, cozinha in zip(rest_ids, cozinhas):
-        num_produtos = random.randint(2, 5) # quantos produtos cada restaurante terá
-        produtos_escolhidos = random.sample(CARDAPIO[cozinha], k=num_produtos) # sorteia os produtos
+        num_produtos = random.randint(2, 5) 
+        produtos_escolhidos = random.sample(CARDAPIO[cozinha], k=num_produtos) 
         
         for nome_produto in produtos_escolhidos:
-            batch_data.append((
-                str(uuid.uuid4()),
-                nome_produto,
-                rest_id
-            ))
+            batch_data.append({
+                "prod_id": str(uuid.uuid4()),
+                "nome": nome_produto,
+                "rest_id": rest_id
+            })
             
         if len(batch_data) >= BATCH_SIZE:
-            execute_values(cursor, query, batch_data)
+            await send_batch(client, "/produtos/batch", batch_data)
             total_inseridos += len(batch_data)
             batch_data = []
 
     if batch_data:
-        execute_values(cursor, query, batch_data)
+        await send_batch(client, "/produtos/batch", batch_data)
         total_inseridos += len(batch_data)
 
     print(f"  -> Total de produtos inseridos: {total_inseridos}")
 
-def main():
-    conn = get_connection()
-    conn.autocommit = False # transação manual para maior segurança e velocidade
-    cursor = conn.cursor()
+async def run_seed():
+    global COORDENADAS
+    COORDENADAS = iter(gerar_coordenadas_validas_sp(NUM_USUARIOS + NUM_ENTREGADORES + NUM_RESTAURANTES))
+    
+    async with httpx.AsyncClient() as client:
+        rest_ids, cozinhas = await seed_restaurantes(client, NUM_RESTAURANTES)
+        await seed_usuarios(client, NUM_USUARIOS)
+        await seed_entregadores(client, NUM_ENTREGADORES)
+        await seed_produtos(client, rest_ids, cozinhas)
+        print("\nCarga inicial do banco via API concluída com sucesso!")
 
-    try:
-        # quantidades solicitadas
-        rest_ids, cozinhas = seed_restaurantes(cursor, NUM_RESTAURANTES)
-        seed_usuarios(cursor, NUM_USUARIOS)
-        seed_entregadores(cursor, NUM_ENTREGADORES)
-        seed_produtos(cursor, rest_ids, cozinhas)
-        
-        # confirma todas as inserções
-        conn.commit()
-        print("\nCarga inicial do banco de dados concluída com sucesso!")
-        
-    except Exception as e:
-        conn.rollback()
-        print(f"\nErro durante a inserção: {e}")
-    finally:
-        cursor.close()
-        conn.close()
+def main():
+    asyncio.run(run_seed())
 
 if __name__ == "__main__":
     main()

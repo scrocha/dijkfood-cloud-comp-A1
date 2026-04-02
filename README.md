@@ -6,61 +6,48 @@ Nessa pasta estão os scripts responsáveis pela criação do banco de dados rel
 
 - `DDL.sql`: Script responsável pela criação do schema e das tabelas do banco de dados.
 - `seed_db.py`: Script responsável pela criação dos dados iniciais do banco de dados.
-- `main.py`: Script responsável por criar a API REST que faz a comunicação com o banco de dados.
-- `models.py`: Script responsável por definir os modelos de dados que serão utilizados na API REST.
-- `simulador_cadastro.py`: Script responsável por simular o cadastro de dados no banco de dados.
-- `Dockerfile`: Script responsável por criar a imagem Docker da API REST.
-- `deploy.py`: Script responsável por subir toda a arquitetura na AWS, incluindo o banco de dados (RDS), o ECS (Elastic Container Service) e o ECR (Elastic Container Registry).
+- `main.py`: Script responsável por criar a API REST (FastAPI). Utiliza pool de conexões assíncronas (`asyncpg`) e possui rotas otimizadas (`/batch`) para suportar alta volumetria de inserções simultâneas.
+- `models.py`: Script responsável por definir os modelos de dados (Pydantic) que serão utilizados na API REST.
+- `simulador_cadastro.py`: Script assíncrono responsável por simular o tráfego de usuários. Utiliza a estratégia de envio em lote (Batching) para atingir alto *throughput* (+200 req/s) mantendo a latência baixa.
+- `Dockerfile`: Script responsável por criar a imagem Docker otimizada da API REST.
+- `deploy.py`: Script automatizado (`boto3`) que provisiona toda a arquitetura na AWS. Ele configura a rede (Security Groups), o banco de dados RDS (otimizado com discos `gp3`), o ECR, o Application Load Balancer (ALB) e o ECS Fargate com **Application Auto Scaling** já configurado.
 
->[!NOTE]
->Não é criada nenhuma instância de EC2 nem para popular a base, nem para rodar o simulador de cadastro. Ambos os scripts são executados localmente e são chamados pelo `deploy.py`.
+> [!NOTE]
+> Não é criada nenhuma instância de EC2 nem para popular a base, nem para rodar o simulador de carga. Ambos os scripts são executados localmente e comunicam-se de forma assíncrona com os recursos criados pelo `deploy.py`.
 
-### Como Executar
+### Como Executar na Nuvem (AWS)
 
-É necessário mover para a raiz do repositório momentâneamente o `simulador_cadastro.py` e o `Dockerfile` para então rodar: 
+Para provisionar a infraestrutura completa na AWS, fazer o build da imagem, deploy da API e rodar o teste de carga automaticamente, execute a partir da raiz do repositório:
 
 ```shell
 uv run python database/deploy.py
 ```
 
->[!NOTE]
->Vou arrumar isso depois, mas, por enquanto, ainda é preciso mover os arquivos para a raiz do repositório para que o simulador funcione.
+### Como Executar Localmente
 
-#### Local
-
-```shell
-# move o simulador de cadastro para a raiz do repositório
-mv database/simulador_cadastro.py .
-
-# move o Dockerfile para a raiz do repositório
-mv database/Dockerfile .
-```
+Para rodar a aplicação inteira no seu ambiente local (via Docker) a partir da raiz do repositório, siga os passos abaixo:
 
 ```shell
-# cria o banco de dados
+# 1. Cria e roda o banco de dados PostgreSQL
 docker run --name dijkfood-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=dijkfood -p 5432:5432 -d postgres:15
 
-# cria o schema e as tabelas
-Get-Content DDL.sql | docker exec -i dijkfood-db psql -U postgres -d dijkfood
-```
+# 2. Cria o schema e as tabelas (Se estiver no Windows/PowerShell)
+Get-Content database/DDL.sql | docker exec -i dijkfood-db psql -U postgres -d dijkfood
+# (Se estiver no Linux/Mac)
+cat database/DDL.sql | docker exec -i dijkfood-db psql -U postgres -d dijkfood
 
-```python
-# faz a carga inicial de dados
-uv run python seed_db.py
-```
+# 3. Faz a carga inicial de dados fixos
+uv run python database/seed_db.py
 
-```shell
-# conecta ao banco de dados (opcional)
-docker exec -it dijkfood-db psql -U postgres -d dijkfood
-```
+# 4. Cria a imagem docker da API (apontando para o contexto raiz)
+docker build -t dijkfood-api-cadastro -f database/Dockerfile . 
 
-```shell
-# cria a imagem docker da api
-docker build -t dijkfood-api-cadastro .  
-
-# executa a api
+# 5. Executa o container da API apontando para o banco local
 docker run --name api-cadastro -p 8000:8000 -e DB_HOST="host.docker.internal" -d dijkfood-api-cadastro
 
-# executa o simulador de cadastro
-uv run python simulador_cadastro.py
+# 6. Executa o simulador de carga para testar a performance
+uv run python database/simulador_cadastro.py
+
+# Utilidade: Conecta ao banco de dados interativamente (opcional)
+docker exec -it dijkfood-db psql -U postgres -d dijkfood
 ```
