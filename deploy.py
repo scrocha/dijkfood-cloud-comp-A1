@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 import time
 import psycopg2
 import subprocess
@@ -70,6 +71,8 @@ API_PORT_CADASTRO = 8000
 API_PORT_ROTAS = 8001
 ALB_PORT = 80
 
+SG_NAME = 'dijkfood-sg-unified'
+
 # clientes boto3
 rds_client = boto3.client('rds', region_name=AWS_REGION)
 ec2_client = boto3.client('ec2', region_name=AWS_REGION)
@@ -82,12 +85,13 @@ app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION
 
 def setup_security_group():
     """Cria um Security Group permitindo acesso às portas necessárias"""
+    print("Configurando Security Group.")
     vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
     vpc_id = vpcs['Vpcs'][0]['VpcId']
     
     try:
         sg_response = ec2_client.create_security_group(
-            GroupName='dijkfood-sg-unified',
+            GroupName=SG_NAME,
             Description='Permite acesso ao PostgreSQL e APIs DijkFood',
             VpcId=vpc_id
         )
@@ -102,54 +106,58 @@ def setup_security_group():
                 {'IpProtocol': 'tcp', 'FromPort': ALB_PORT, 'ToPort': ALB_PORT, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}
             ]
         )
-        print("Criação do Security Group bem sucedida.")
+        print(f"Criação do Security Group '{SG_NAME}' bem sucedida.")
         return sg_id
 
-    except Exception as e:
-        if "InvalidGroup.Duplicate" in str(e):
-            print("Security Group já existe. Buscando o ID...")
-            sgs = ec2_client.describe_security_groups(GroupNames=['dijkfood-sg-unified'])
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'InvalidGroup.Duplicate':
+            print(f"Security Group '{SG_NAME}' já existe. Recuperando ID.")
+            sgs = ec2_client.describe_security_groups(GroupNames=[SG_NAME])
             return sgs['SecurityGroups'][0]['GroupId']
         raise e
 
 
 def get_or_create_rds_instance(sg_id):
     """Provisiona o banco PostgreSQL, mas reutiliza se já existir"""
-    print("Verificando se o banco RDS já existe...")
+    print(f"Verificando instância RDS '{DB_IDENTIFIER}'.")
     try:
         response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
         status = response['DBInstances'][0]['DBInstanceStatus']
+        endpoint = response['DBInstances'][0]['Endpoint']['Address']
+        
         if status == 'available':
-            endpoint = response['DBInstances'][0]['Endpoint']['Address']
-            print(f"Banco RDS já existe e está pronto. Endpoint reutilizado: {endpoint}")
+            print(f"Banco RDS pronto. Endpoint: {endpoint}")
             return endpoint
         else:
-            print(f"Banco RDS encontrado com status '{status}'. Aguardando ficar disponível...")
+            print(f"Banco RDS status: '{status}'. Aguardando disponibilidade.")
             
-    except rds_client.exceptions.DBInstanceNotFoundFault:
-        print("Banco RDS não encontrado. Iniciando criação (isso vai demorar alguns minutos)...")
-        rds_client.create_db_instance(
-            DBInstanceIdentifier=DB_IDENTIFIER,
-            AllocatedStorage=DB_ALLOCATED_STORAGE,
-            DBInstanceClass=DB_INSTANCE_TYPE,
-            Engine=DB_ENGINE,
-            EngineVersion=DB_ENGINE_VERSION,
-            MasterUsername=DB_USER,
-            MasterUserPassword=DB_PASSWORD,
-            BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
-            StorageType=DB_STORAGE_TYPE,
-            DBName=DB_NAME,
-            VpcSecurityGroupIds=[sg_id],
-            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
-        )
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DBInstanceNotFound':
+            print("Banco RDS não encontrado. Criando instância (pode levar alguns minutos).")
+            rds_client.create_db_instance(
+                DBInstanceIdentifier=DB_IDENTIFIER,
+                AllocatedStorage=DB_ALLOCATED_STORAGE,
+                DBInstanceClass=DB_INSTANCE_TYPE,
+                Engine=DB_ENGINE,
+                EngineVersion=DB_ENGINE_VERSION,
+                MasterUsername=DB_USER,
+                MasterUserPassword=DB_PASSWORD,
+                BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
+                StorageType=DB_STORAGE_TYPE,
+                DBName=DB_NAME,
+                VpcSecurityGroupIds=[sg_id],
+                PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
+            )
+        else:
+            raise e
 
+    print("Aguardando RDS ficar 'available'.")
     waiter = rds_client.get_waiter('db_instance_available')
     waiter.wait(DBInstanceIdentifier=DB_IDENTIFIER)
     
     response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
     endpoint = response['DBInstances'][0]['Endpoint']['Address']
-
-    print(f"Banco RDS disponível. Endpoint: {endpoint}")
+    print(f"RDS disponível: {endpoint}")
     return endpoint
 
 
@@ -176,17 +184,18 @@ def run_ddl_only(endpoint):
 
 
 def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
-    """Cria o repositório ECR, constrói e envia a imagem"""
+    """Cria o repositório ECR se não existir, constrói e envia a imagem"""
     account_id = sts_client.get_caller_identity()["Account"]
     ecr_uri = f"{account_id}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo_name}"
     
     try:
-        print(f"Criando repositório ECR: {repo_name}")
+        print(f"Verificando repositório ECR: {repo_name}")
         ecr_client.create_repository(repositoryName=repo_name)
-    except ecr_client.exceptions.RepositoryAlreadyExistsException:
-        pass
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'RepositoryAlreadyExistsException':
+            raise e
 
-    print(f"Autenticando Docker na AWS para {repo_name}.")
+    print(f"Autenticando Docker no ECR.")
     auth_token = ecr_client.get_authorization_token()
     token = auth_token['authorizationData'][0]['authorizationToken']
     username, password = base64.b64decode(token).decode('utf-8').split(':')
@@ -198,7 +207,7 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
         check=True, stdout=subprocess.DEVNULL
     )
     
-    print(f"Fazendo Build e Push da Imagem: {repo_name}")
+    print(f"Build e Push ({repo_name}).")
     subprocess.run(["docker", "build", "-t", repo_name, "-f", str(dockerfile_path), str(context_dir)], check=True)
     subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
     subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
@@ -280,7 +289,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
         family=TASK_ROTAS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu="512", memory="1024",
+        cpu=TASK_CPU, memory=TASK_MEMORY,
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "rotas-container",
@@ -303,62 +312,116 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     subnets = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
     subnet_ids = [s['SubnetId'] for s in subnets['Subnets'][:2]]
     
-    print("Criando ALB e Listeners...")
-    alb_response = elbv2_client.create_load_balancer(
-        Name=ALB_NAME, Subnets=subnet_ids, SecurityGroups=[sg_id],
-        Scheme=ALB_SCHEME, Type=ALB_TYPE, IpAddressType=ALB_IP_ADDRESS_TYPE
-    )
-    alb_arn = alb_response['LoadBalancers'][0]['LoadBalancerArn']
-    alb_dns = alb_response['LoadBalancers'][0]['DNSName']
+    print("Criando/Verificando ALB e Listeners.")
+    try:
+        alb_response = elbv2_client.create_load_balancer(
+            Name=ALB_NAME, Subnets=subnet_ids, SecurityGroups=[sg_id],
+            Scheme=ALB_SCHEME, Type=ALB_TYPE, IpAddressType=ALB_IP_ADDRESS_TYPE
+        )
+        alb_arn = alb_response['LoadBalancers'][0]['LoadBalancerArn']
+        alb_dns = alb_response['LoadBalancers'][0]['DNSName']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DuplicateLoadBalancerName':
+            albs = elbv2_client.describe_load_balancers(Names=[ALB_NAME])
+            alb_arn = albs['LoadBalancers'][0]['LoadBalancerArn']
+            alb_dns = albs['LoadBalancers'][0]['DNSName']
+        else:
+            raise e
     
     waiter = elbv2_client.get_waiter('load_balancer_available')
     waiter.wait(LoadBalancerArns=[alb_arn])
     
-    tg_cad_resp = elbv2_client.create_target_group(
-        Name=TG_CADASTRO_NAME, Protocol='HTTP', Port=API_PORT_CADASTRO, VpcId=vpc_id, TargetType='ip',
-        HealthCheckProtocol='HTTP', HealthCheckPath='/docs', HealthCheckIntervalSeconds=30
-    )
-    tg_cad_arn = tg_cad_resp['TargetGroups'][0]['TargetGroupArn']
+    # Target Group Cadastro
+    try:
+        tg_cad_resp = elbv2_client.create_target_group(
+            Name=TG_CADASTRO_NAME, Protocol='HTTP', Port=API_PORT_CADASTRO, VpcId=vpc_id, TargetType='ip',
+            HealthCheckProtocol='HTTP', HealthCheckPath='/docs', HealthCheckIntervalSeconds=30
+        )
+        tg_cad_arn = tg_cad_resp['TargetGroups'][0]['TargetGroupArn']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+            tgs = elbv2_client.describe_target_groups(Names=[TG_CADASTRO_NAME])
+            tg_cad_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+        else:
+            raise e
 
-    tg_rotas_resp = elbv2_client.create_target_group(
-        Name=TG_ROTAS_NAME, Protocol='HTTP', Port=API_PORT_ROTAS, VpcId=vpc_id, TargetType='ip',
-        HealthCheckProtocol='HTTP', HealthCheckPath='/health', HealthCheckIntervalSeconds=30
-    )
-    tg_rotas_arn = tg_rotas_resp['TargetGroups'][0]['TargetGroupArn']
+    # Target Group Rotas
+    try:
+        tg_rotas_resp = elbv2_client.create_target_group(
+            Name=TG_ROTAS_NAME, Protocol='HTTP', Port=API_PORT_ROTAS, VpcId=vpc_id, TargetType='ip',
+            HealthCheckProtocol='HTTP', HealthCheckPath='/rotas/health', HealthCheckIntervalSeconds=30
+        )
+        tg_rotas_arn = tg_rotas_resp['TargetGroups'][0]['TargetGroupArn']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+            tgs = elbv2_client.describe_target_groups(Names=[TG_ROTAS_NAME])
+            tg_rotas_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+        else:
+            raise e
     
-    listener_resp = elbv2_client.create_listener(
-        LoadBalancerArn=alb_arn, Protocol='HTTP', Port=ALB_PORT,
-        DefaultActions=[{'Type': 'forward', 'TargetGroupArn': tg_cad_arn}]
-    )
-    listener_arn = listener_resp['Listeners'][0]['ListenerArn']
+    # Listener
+    listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
+    listener_arn = next((l['ListenerArn'] for l in listeners if l['Port'] == ALB_PORT), None)
 
-    elbv2_client.create_rule(
-        ListenerArn=listener_arn,
-        Conditions=[{'Field': 'path-pattern', 'Values': ['/rotas*', '/route*']}],
-        Priority=10,
-        Actions=[{'Type': 'forward', 'TargetGroupArn': tg_rotas_arn}]
-    )
+    if not listener_arn:
+        listener_resp = elbv2_client.create_listener(
+            LoadBalancerArn=alb_arn, Protocol='HTTP', Port=ALB_PORT,
+            DefaultActions=[{'Type': 'forward', 'TargetGroupArn': tg_cad_arn}]
+        )
+        listener_arn = listener_resp['Listeners'][0]['ListenerArn']
     
-    print("Iniciando ECS Services atrelados ao ALB...")
-    ecs_client.create_service(
-        cluster=CLUSTER_NAME, serviceName="dijkfood-cadastro-service", taskDefinition=TASK_CADASTRO_FAMILY,
-        desiredCount=1, launchType="FARGATE",
-        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
-        loadBalancers=[{"targetGroupArn": tg_cad_arn, "containerName": "cadastro-container", "containerPort": API_PORT_CADASTRO}]
-    )
-
-    ecs_client.create_service(
-        cluster=CLUSTER_NAME, serviceName="dijkfood-rotas-service", taskDefinition=TASK_ROTAS_FAMILY,
-        desiredCount=1, launchType="FARGATE",
-        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
-        loadBalancers=[{"targetGroupArn": tg_rotas_arn, "containerName": "rotas-container", "containerPort": API_PORT_ROTAS}]
-    )
-
-    print("Configurando Auto Scaling para os Serviços.")
-    setup_auto_scaling("dijkfood-cadastro-service")
-    setup_auto_scaling("dijkfood-rotas-service")
+    # Rule
+    rules = elbv2_client.describe_rules(ListenerArn=listener_arn)['Rules']
+    if not any(r.get('Priority') == '10' for r in rules):
+        elbv2_client.create_rule(
+            ListenerArn=listener_arn,
+            Conditions=[{'Field': 'path-pattern', 'Values': ['/rotas*', '/route*']}],
+            Priority=10,
+            Actions=[{'Type': 'forward', 'TargetGroupArn': tg_rotas_arn}]
+        )
     
-    print("Aguardando Serviços ficarem online...")
+    print("Iniciando/Atualizando ECS Services.")
+
+    def create_or_update_service(service_name, task_family, tg_arn, container_name, container_port):
+        try:
+            # 1. Tenta descrever o serviço primeiro para verificar existência
+            response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
+            
+            # Se o serviço existe (e não está sendo deletado)
+            if response['services'] and response['services'][0]['status'] != 'INACTIVE':
+                print(f"Serviço '{service_name}' já existe. Atualizando.")
+                ecs_client.update_service(
+                    cluster=CLUSTER_NAME,
+                    service=service_name,
+                    taskDefinition=task_family,
+                    forceNewDeployment=True
+                )
+            else:
+                # 2. Se não existe, cria
+                print(f"Criando novo serviço '{service_name}'.")
+                ecs_client.create_service(
+                    cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
+                    desiredCount=1, launchType="FARGATE",
+                    networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
+                    loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                )
+                setup_auto_scaling(service_name)
+
+        except ClientError as e:
+            # Fallback para o caso de erro de race condition ou similar
+            if e.response['Error']['Code'] == 'InvalidParameterException' and 'already exists' in e.response['Error']['Message']:
+                print(f"Aviso: Serviço '{service_name}' detectado via erro de redundância. Forçando update.")
+                ecs_client.update_service(
+                    cluster=CLUSTER_NAME, service=service_name, 
+                    taskDefinition=task_family, forceNewDeployment=True
+                )
+            else:
+                raise e
+
+    create_or_update_service("dijkfood-cadastro-service", TASK_CADASTRO_FAMILY, tg_cad_arn, "cadastro-container", API_PORT_CADASTRO)
+    create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS)
+    
+    print("Aguardando Serviços ficarem online.")
     waiter = ecs_client.get_waiter('services_stable')
     waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service"])
     
@@ -366,23 +429,34 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     return alb_dns
 
 
-def destroy_infrastructure(sg_id):
+def destroy_infrastructure():
     """Destrói os recursos ECS, ALB, ECR. Mantém o Banco de Dados e o SG intactos."""
-    print("Iniciando a destruição dos recursos AWS (Mantendo Banco de Dados vivo)...")
+    print("Iniciando a destruição dos recursos AWS (Mantendo Banco de Dados vivo).")
     
     # 1. Destruir ECS Services e Cluster
     services = ["dijkfood-cadastro-service", "dijkfood-rotas-service"]
     for svc in services:
         try:
-            ecs_client.update_service(cluster=CLUSTER_NAME, serviceName=svc, desiredCount=0)
+            ecs_client.update_service(cluster=CLUSTER_NAME, service=svc, desiredCount=0)
         except Exception:
             pass
 
     try:
-        waiter = ecs_client.get_waiter('services_stable')
-        waiter.wait(cluster=CLUSTER_NAME, services=services)
+        actual_services = []
         for svc in services:
-            ecs_client.delete_service(cluster=CLUSTER_NAME, serviceName=svc)
+            try:
+                res = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[svc])
+                if res['services'] and res['services'][0]['status'] != 'INACTIVE':
+                    actual_services.append(svc)
+            except Exception:
+                pass
+
+        if actual_services:
+            waiter = ecs_client.get_waiter('services_stable')
+            waiter.wait(cluster=CLUSTER_NAME, services=actual_services)
+            for svc in actual_services:
+                ecs_client.delete_service(cluster=CLUSTER_NAME, service=svc)
+        
         ecs_client.delete_cluster(cluster=CLUSTER_NAME)
         print("Cluster e Serviços ECS apagados.")
     except Exception as e:
@@ -442,21 +516,30 @@ def main():
         env = os.environ.copy()
         env["API_URL"] = f"http://{alb_dns}"
         
-        print("6. População do RDS (executando seed_db.py)")
-        subprocess.run(["uv", "run", "python", str(SEED_PATH)], env=env, check=True)
+        # print("6. População do RDS (executando seed_db.py)")
+        # subprocess.run(["uv", "run", "python", str(SEED_PATH)], env=env, check=True)
         
-        print("7. Simulando carga no RDS (executando simulador_cadastro.py)")
-        subprocess.run(["uv", "run", "python", str(SIMULADOR_PATH)], env=env)
+        # print("7. Simulando carga no RDS (executando simulador_cadastro.py)")
+        # subprocess.run(["uv", "run", "python", str(SIMULADOR_PATH)], env=env)
+
+        print("\n" + "=" * 60)
+        print("DEPLOY FINALIZADO COM SUCESSO")
+        print("=" * 60)
+        print(f"API Cadastro Health: http://{alb_dns}/docs")
+        print(f"API Rotas Health:    http://{alb_dns}/rotas/health")
+        print("=" * 60)
 
     except Exception as e:
         print(f"\nErro Grave no Fluxo: {e}\n")
         
     finally:
         if sg_id:
-            print("8. Destruição da infraestrutura")
-            destroy_infrastructure(sg_id) 
+            # print("8. Destruição da infraestrutura")
+            # destroy_infrastructure()
+            pass
 
         print("Execução do deploy.py finalizada.")
 
 if __name__ == "__main__":
     main()
+    # destroy_infrastructure()
