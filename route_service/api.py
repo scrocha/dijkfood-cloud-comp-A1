@@ -1,0 +1,217 @@
+import os
+import math
+import boto3
+import gc
+import osmnx as ox
+import networkx as nx
+import numpy as np
+import asyncio
+from functools import lru_cache
+from scipy.spatial import cKDTree
+
+from fastapi import FastAPI, HTTPException
+from typing import Any, Dict, Tuple, List, Optional
+
+from route_service.models import (
+    EntregadorRequest, Ponto, RotaRequest, 
+    EntregadorResponse, RotaEntregaResponse
+)
+
+GRAPH_FILE_NAME = "grafo_sp.graphml"
+AWS_BUCKET_NAME = "grafo-dijkfood-sp-1"
+AWS_REGION = "us-east-1"
+EDGE_WEIGHT = "length"
+
+# --- Estruturas de Dados Globais Otimizadas ---
+GLOBAL_GRAPH: nx.DiGraph = None
+GLOBAL_NODE_COORDS: Dict[int, Tuple[float, float]] = {}
+GLOBAL_TREE: cKDTree = None
+GLOBAL_NODE_IDS: np.ndarray = None
+
+def startup_optimization():
+    global GLOBAL_GRAPH, GLOBAL_NODE_COORDS, GLOBAL_TREE, GLOBAL_NODE_IDS
+
+    if not os.path.exists(GRAPH_FILE_NAME):
+        print("Baixando grafo do S3")
+        s3 = boto3.client("s3", region_name=AWS_REGION)
+        s3.download_file(AWS_BUCKET_NAME, GRAPH_FILE_NAME, GRAPH_FILE_NAME)
+            
+    multi_g = ox.load_graphml(GRAPH_FILE_NAME)
+    
+    print("Grafo carregado")
+
+    GLOBAL_GRAPH = nx.DiGraph()
+    
+    coords_for_tree = []
+    node_ids_list = []
+    
+    for node_id, data in multi_g.nodes(data=True):
+        lat, lon = data['y'], data['x']
+        GLOBAL_GRAPH.add_node(node_id)
+        GLOBAL_NODE_COORDS[node_id] = (lat, lon)
+        coords_for_tree.append([lat, lon])
+        node_ids_list.append(node_id)
+
+    for u, v, data in multi_g.edges(data=True):
+        w = data.get(EDGE_WEIGHT, float('inf'))
+        if isinstance(w, list): 
+            w = min(w)
+        w = float(w)
+        
+        if GLOBAL_GRAPH.has_edge(u, v):
+            GLOBAL_GRAPH[u][v][EDGE_WEIGHT] = min(GLOBAL_GRAPH[u][v][EDGE_WEIGHT], w)
+        else:
+            GLOBAL_GRAPH.add_edge(u, v, **{EDGE_WEIGHT: w})
+    print("Grafo convertido para NetworkX")
+
+    GLOBAL_TREE = cKDTree(np.array(coords_for_tree, dtype=np.float32))
+    GLOBAL_NODE_IDS = np.array(node_ids_list)
+
+    print("Árvore KD-Tree construída para busca de nós mais próximos")
+
+    del multi_g
+    gc.collect()
+    print("Api pronta para receber requisições")
+
+startup_optimization()
+
+app = FastAPI(
+    title="DijkFood API - Serviço de Rotas"
+)
+
+# --- Funções de Roteamento e Busca ---
+
+@lru_cache(maxsize=50000)
+def obter_no_mais_proximo_cache(lat_rnd: float, lon_rnd: float) -> int:
+    _, idx = GLOBAL_TREE.query([lat_rnd, lon_rnd])
+    return GLOBAL_NODE_IDS[idx]
+
+def projetar_ponto(ponto: Ponto) -> Tuple[int, Ponto]:
+    lat_rnd, lon_rnd = round(ponto.lat, 4), round(ponto.lon, 4)
+    node_id = obter_no_mais_proximo_cache(lat_rnd, lon_rnd)
+    
+    lat_proj, lon_proj = GLOBAL_NODE_COORDS[node_id]
+    return node_id, Ponto(lat=lat_proj, lon=lon_proj)
+
+def encontrar_top_n_entregadores(restaurante: Ponto, entregadores: list[Ponto], n: int = 5) -> list[int]:
+    coords_entregadores = np.array([(e.lat, e.lon) for e in entregadores], dtype=np.float32)
+    lat_rest, lon_rest = restaurante.lat, restaurante.lon
+    
+    cos_lat = math.cos(math.radians(lat_rest))
+    diff = coords_entregadores - np.array([lat_rest, lon_rest], dtype=np.float32)
+    diff[:, 1] *= cos_lat 
+    
+    distancias_sq = np.sum(diff ** 2, axis=1)
+    
+    n = min(n, len(entregadores))
+    top_n_idx = np.argpartition(distancias_sq, n - 1)[:n]
+    return top_n_idx.tolist()
+
+def criar_heuristica_otimizada(no_destino: int):
+    lat2_deg, lon2_deg = GLOBAL_NODE_COORDS[no_destino]
+    lat2 = math.radians(lat2_deg)
+    lon2 = math.radians(lon2_deg)
+    cos_lat2 = math.cos(lat2)
+    R = 6371000.0
+
+    def calcular_heuristica(u, v):
+        lat1_deg, lon1_deg = GLOBAL_NODE_COORDS[u]
+        lat1 = math.radians(lat1_deg)
+        lon1 = math.radians(lon1_deg)
+        
+        x = (lon2 - lon1) * cos_lat2
+        y = (lat2 - lat1)
+        return R * math.hypot(x, y) 
+    
+    return calcular_heuristica
+
+def extrair_comprimento_do_caminho(G: nx.DiGraph, caminho: list) -> float:
+    return sum(G[u][v].get(EDGE_WEIGHT, 0.0) for u, v in zip(caminho[:-1], caminho[1:]))
+
+# --- Lógica Assíncrona e Endpoints ---
+
+async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[str, Any]]:
+    no_origem, ponto_origem_proj = await asyncio.to_thread(projetar_ponto, origem)
+    no_destino, ponto_destino_proj = await asyncio.to_thread(projetar_ponto, destino)
+
+    if no_origem == no_destino:
+        return {
+            "distancia_metros": 0.0, "nos": 1,
+            "coordenadas": [{"lat": ponto_origem_proj.lat, "lon": ponto_origem_proj.lon}],
+            "origem_projetada": ponto_origem_proj, "destino_projetado": ponto_destino_proj
+        }
+
+    heuristica = criar_heuristica_otimizada(no_destino)
+
+    try:
+        caminho = await asyncio.to_thread(
+            nx.astar_path, GLOBAL_GRAPH, no_origem, no_destino, 
+            heuristic=heuristica, weight=EDGE_WEIGHT
+        )
+        comprimento = await asyncio.to_thread(extrair_comprimento_do_caminho, GLOBAL_GRAPH, caminho)
+        
+    except nx.NetworkXNoPath:
+        return None 
+
+    coords = [{"lat": GLOBAL_NODE_COORDS[n][0], "lon": GLOBAL_NODE_COORDS[n][1]} for n in caminho]
+
+    return {
+        "distancia_metros": round(comprimento, 2),
+        "nos": len(caminho),
+        "coordenadas": coords,
+        "origem_projetada": ponto_origem_proj,
+        "destino_projetado": ponto_destino_proj
+    }
+
+@app.post("/entregador-mais-proximo", response_model=EntregadorResponse)
+async def entregador_mais_proximo(req: EntregadorRequest):
+    top_n_indices = await asyncio.to_thread(
+        encontrar_top_n_entregadores, req.restaurante, req.entregadores, n=5
+    )
+    
+    tarefas_rotas = [
+        calcular_rota_async(req.entregadores[idx], req.restaurante)
+        for idx in top_n_indices
+    ]
+    resultados_rotas = await asyncio.gather(*tarefas_rotas)
+    
+    melhor_rota = None
+    melhor_idx = -1
+    menor_distancia = float('inf')
+    
+    for idx, rota in zip(top_n_indices, resultados_rotas):
+        if rota and rota["distancia_metros"] < menor_distancia:
+            menor_distancia = rota["distancia_metros"]
+            melhor_rota = rota
+            melhor_idx = idx
+
+    if not melhor_rota:
+        raise HTTPException(status_code=404, detail="Não foi possível rotear nenhum dos entregadores próximos.")
+
+    return {
+        "entregador_idx": melhor_idx,
+        "entregador_original": req.entregadores[melhor_idx],
+        "rota_ao_restaurante": melhor_rota
+    }
+
+@app.post("/rota-entrega", response_model=RotaEntregaResponse)
+async def rota_entrega(req: RotaRequest):
+    rota = await calcular_rota_async(req.origem, req.destino)
+    
+    if not rota:
+         raise HTTPException(status_code=404, detail="Não existe rota viária possível.")
+         
+    return {
+        "restaurante_solicitado": req.origem,
+        "cliente_solicitado": req.destino,
+        "dados_rota": rota
+    }
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok", 
+        "nos_no_grafo": GLOBAL_GRAPH.number_of_nodes(),
+        "arestas_no_grafo": GLOBAL_GRAPH.number_of_edges(),
+        "cache_kdtree_stats": obter_no_mais_proximo_cache.cache_info()._asdict()
+    }
