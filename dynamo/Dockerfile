@@ -17,7 +17,7 @@ RUN uv sync --no-dev --no-install-project --frozen
 # Copiar o código (agora na pasta dynamo)
 COPY dynamo/ /app/dynamo/
 
-EXPOSE 8000
+EXPOSE 8002
 
 # Comando para rodar a API usando o módulo dynamo
-CMD ["uvicorn", "dynamo.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "dynamo.api:app", "--host", "0.0.0.0", "--port", "8002"]
