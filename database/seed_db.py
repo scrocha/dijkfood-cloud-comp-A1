@@ -6,7 +6,9 @@ import uuid
 import osmnx as ox
 import os
 
-fake = Faker('pt_BR') # inicializa o faker
+fake = Faker('pt_BR')
+
+COORDENADAS = None
 
 NUM_USUARIOS = 50000
 NUM_ENTREGADORES = 150000
@@ -67,11 +69,8 @@ def gerar_coordenadas_validas_sp(quantidade):
     multiponto = amostra.iloc[0]
     coordenadas = [(ponto.y, ponto.x) for ponto in multiponto.geoms]
     
-    print("Coordenadas geradas com sucesso!")
+    print(f"{quantidade} coordenadas de SP geradas.")
     return coordenadas
-
-# Variável p/ as coordenadas (será instanciada no main)
-COORDENADAS = None
 
 async def send_batch(client, endpoint, payload):
     try:
@@ -81,7 +80,7 @@ async def send_batch(client, endpoint, payload):
         print(f"Erro ao enviar para {endpoint}: {e}")
 
 async def seed_usuarios(client, total):
-    print(f"Gerando {total} usuários em lotes de {BATCH_SIZE} por API...")
+    print(f"Iniciando carga de {total} usuários...")
     
     for batch_start in range(0, total, BATCH_SIZE):
         batch_data = []
@@ -94,17 +93,16 @@ async def seed_usuarios(client, total):
                 "ultimo_nome": fake.last_name(),
                 "email": fake.unique.email(),
                 "telefone": fake.phone_number()[:20],
-                "senha": fake.password(),
-                "data_nascimento": str(fake.date_of_birth(minimum_age=18, maximum_age=80)),
                 "endereco_latitude": lat,
                 "endereco_longitude": lon
             })
 
-        await send_batch(client, "/usuarios/batch", batch_data)
-        print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
+        await send_batch(client, "/cadastro/batch", batch_data)
+        
+    print(f"Carga de usuários finalizada. {total} usuários inseridos.")
 
 async def seed_restaurantes(client, total):
-    print(f"Gerando {total} restaurantes em lotes de {BATCH_SIZE} por API...")
+    print(f"Iniciando carga de {total} restaurantes...")
     rest_ids = []
     cozinhas = []
 
@@ -126,13 +124,13 @@ async def seed_restaurantes(client, total):
                 "endereco_longitude": lon
             })
 
-        await send_batch(client, "/restaurantes/batch", batch_data)
-        print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
-
+        await send_batch(client, "/cadastro/restaurantes/batch", batch_data)
+        
+    print(f"Carga de restaurantes finalizada. {total} restaurantes inseridos.")
     return rest_ids, cozinhas
 
 async def seed_entregadores(client, total):
-    print(f"Gerando {total} entregadores em lotes de {BATCH_SIZE} por API...")
+    print(f"Iniciando carga de {total} entregadores...")
     
     for batch_start in range(0, total, BATCH_SIZE):
         batch_data = []
@@ -148,11 +146,12 @@ async def seed_entregadores(client, total):
                 "endereco_longitude": lon
             })
 
-        await send_batch(client, "/entregadores/batch", batch_data)
-        print(f"  -> Inseridos {batch_start + len(batch_data)}/{total}")
+        await send_batch(client, "/cadastro/entregadores/batch", batch_data)
+        
+    print(f"Carga de entregadores finalizada. {total} entregadores inseridos.")
 
 async def seed_produtos(client, rest_ids, cozinhas):
-    print(f"Gerando produtos para {len(rest_ids)} restaurantes via API...")
+    print(f"Iniciando carga de produtos para os restaurantes...")
     batch_data = []
     total_inseridos = 0
 
@@ -168,15 +167,15 @@ async def seed_produtos(client, rest_ids, cozinhas):
             })
             
         if len(batch_data) >= BATCH_SIZE:
-            await send_batch(client, "/produtos/batch", batch_data)
+            await send_batch(client, "/cadastro/produtos/batch", batch_data)
             total_inseridos += len(batch_data)
             batch_data = []
 
     if batch_data:
-        await send_batch(client, "/produtos/batch", batch_data)
+        await send_batch(client, "/cadastro/produtos/batch", batch_data)
         total_inseridos += len(batch_data)
 
-    print(f"  -> Total de produtos inseridos: {total_inseridos}")
+    print(f"Total de produtos inseridos: {total_inseridos}")
 
 async def run_seed():
     global COORDENADAS
@@ -187,7 +186,7 @@ async def run_seed():
         await seed_usuarios(client, NUM_USUARIOS)
         await seed_entregadores(client, NUM_ENTREGADORES)
         await seed_produtos(client, rest_ids, cozinhas)
-        print("\nCarga inicial do banco via API concluída com sucesso!")
+        print("Carga inicial do banco concluída!")
 
 def main():
     asyncio.run(run_seed())

@@ -6,7 +6,6 @@ import uuid
 from faker import Faker
 import os
 
-# Mantivemos a sua carga total: 35 de cada + 3 produtos por restaurante (105 produtos) = 210 itens/segundo
 RESTAURANTES_POR_SEGUNDO = 35
 PRODUTOS_POR_RESTAURANTE = 3
 ENTREGADORES_POR_SEGUNDO = 35
@@ -61,10 +60,11 @@ async def simular_ciclo(client):
     # 1. Prepara os Lotes (Listas de Dicionários)
     for _ in range(USUARIOS_POR_SEGUNDO):
         user = {
-            "user_id": str(uuid.uuid4()), "primeiro_nome": fake.first_name(),
-            "ultimo_nome": fake.last_name(), "email": fake.unique.email(),
-            "telefone": fake.phone_number()[:20], "senha": fake.password(),
-            "data_nascimento": str(fake.date_of_birth(minimum_age=18)),
+            "user_id": str(uuid.uuid4()), 
+            "primeiro_nome": fake.first_name(),
+            "ultimo_nome": fake.last_name(), 
+            "email": fake.unique.email(),
+            "telefone": fake.phone_number()[:20], 
             "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
         }
@@ -72,7 +72,8 @@ async def simular_ciclo(client):
 
     for _ in range(ENTREGADORES_POR_SEGUNDO):
         entregador = {
-            "entregador_id": str(uuid.uuid4()), "nome": fake.name(),
+            "entregador_id": str(uuid.uuid4()), 
+            "nome": fake.name(),
             "tipo_veiculo": random.choice(TIPOS_VEICULO),
             "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
@@ -84,8 +85,10 @@ async def simular_ciclo(client):
         cozinha = random.choice(TIPOS_COZINHA)
         restaurantes_criados.append((rest_id, cozinha))
         restaurante = {
-            "rest_id": rest_id, "nome": fake.company(),
-            "tipo_cozinha": cozinha, "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
+            "rest_id": rest_id, 
+            "nome": fake.company(),
+            "tipo_cozinha": cozinha, 
+            "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
         }
         restaurantes_lote.append(restaurante)
@@ -93,9 +96,9 @@ async def simular_ciclo(client):
     # 2. Dispara os Lotes apontando para as rotas /batch
     # Apenas 3 requisições HTTP vão transportar as centenas de itens
     tasks_lote_1 = [
-        call_api(client, "/usuarios/batch", usuarios_lote),
-        call_api(client, "/entregadores/batch", entregadores_lote),
-        call_api(client, "/restaurantes/batch", restaurantes_lote)
+        call_api(client, "/cadastro/batch", usuarios_lote),
+        call_api(client, "/cadastro/entregadores/batch", entregadores_lote),
+        call_api(client, "/cadastro/restaurantes/batch", restaurantes_lote)
     ]
     await asyncio.gather(*tasks_lote_1)
 
@@ -110,7 +113,7 @@ async def simular_ciclo(client):
 
     # 4. Dispara 1 única requisição HTTP com todos os produtos do ciclo
     if produtos_lote:
-        await asyncio.gather(call_api(client, "/produtos/batch", produtos_lote))
+        await asyncio.gather(call_api(client, "/cadastro/produtos/batch", produtos_lote))
 
 async def workload_shooter(client):
     """
@@ -124,7 +127,7 @@ async def workload_shooter(client):
 async def display_metrics():
     """Mostra as métricas a cada 2 segundos"""
     while True:
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(1.0)
         
         global todas_latencias
         if len(todas_latencias) > 50000:
