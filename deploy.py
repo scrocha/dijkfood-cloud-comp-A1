@@ -6,9 +6,6 @@ import os
 import base64
 from pathlib import Path
 
-# =========================================================================
-# CONFIGURAÇÃO DE CAMINHOS (BLINDADA)
-# =========================================================================
 # Assumindo que este deploy.py está sendo rodado na raiz do projeto
 ROOT_DIR = Path(__file__).resolve().parent 
 DATABASE_DIR = ROOT_DIR / "database"
@@ -29,6 +26,8 @@ DB_STORAGE_TYPE = "gp3"
 DB_BACKUP_RETENTION_PERIOD = 7
 DB_DELETE_PROTECTION = False
 DB_PUBLICLY_ACCESSIBLE = True
+DB_MULTI_AZ = True
+DB_STORAGE_ENCRYPTED = True
 
 DB_IDENTIFIER = "dijkfood-db-instance"
 DB_NAME = "dijkfood"
@@ -41,8 +40,11 @@ CLUSTER_NAME = "dijkfood-cluster"
 TASK_CADASTRO_FAMILY = "dijkfood-cadastro-task"
 TASK_ROTAS_FAMILY = "dijkfood-rotas-task"
 TASK_NETWORK_MODE = "awsvpc"
-TASK_CPU = "1024"
-TASK_MEMORY = "2048"
+
+TASK_CADASTRO_CPU = "1024"
+TASK_CADASTRO_MEMORY = "2048"
+TASK_ROTAS_CPU = "512"
+TASK_ROTAS_MEMORY = "1024"
 
 # configurações ALB
 ALB_NAME = "dijkfood-alb"
@@ -53,7 +55,7 @@ ALB_IP_ADDRESS_TYPE = "ipv4"
 # configurações auto scaling
 AS_MIN_CAPACITY = 1
 AS_MAX_CAPACITY = 10
-AS_TARGET_VALUE = 70.0
+AS_TARGET_VALUE = 10.0 # coloquei 10% para testar o auto scaling
 AS_SCALE_OUT_COOLDOWN = 60
 AS_SCALE_IN_COOLDOWN = 60
     
@@ -82,6 +84,7 @@ app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION
 
 def setup_security_group():
     """Cria um Security Group permitindo acesso às portas necessárias"""
+    
     vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
     vpc_id = vpcs['Vpcs'][0]['VpcId']
     
@@ -115,19 +118,19 @@ def setup_security_group():
 
 def get_or_create_rds_instance(sg_id):
     """Provisiona o banco PostgreSQL, mas reutiliza se já existir"""
-    print("Verificando se o banco RDS já existe...")
+
     try:
         response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
         status = response['DBInstances'][0]['DBInstanceStatus']
         if status == 'available':
             endpoint = response['DBInstances'][0]['Endpoint']['Address']
-            print(f"Banco RDS já existe e está pronto. Endpoint reutilizado: {endpoint}")
+            print(f"Banco RDS já existente. Endpoint reutilizado: {endpoint}")
             return endpoint
         else:
-            print(f"Banco RDS encontrado com status '{status}'. Aguardando ficar disponível...")
+            print(f"Banco RDS encontrado com status '{status}'. Aguardando ficar disponível.")
             
     except rds_client.exceptions.DBInstanceNotFoundFault:
-        print("Banco RDS não encontrado. Iniciando criação (isso vai demorar alguns minutos)...")
+        print("Banco RDS não encontrado. Iniciando criação de um novo.")
         rds_client.create_db_instance(
             DBInstanceIdentifier=DB_IDENTIFIER,
             AllocatedStorage=DB_ALLOCATED_STORAGE,
@@ -140,7 +143,9 @@ def get_or_create_rds_instance(sg_id):
             StorageType=DB_STORAGE_TYPE,
             DBName=DB_NAME,
             VpcSecurityGroupIds=[sg_id],
-            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
+            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE,
+            MultiAZ=DB_MULTI_AZ,
+            StorageEncrypted=DB_STORAGE_ENCRYPTED
         )
 
     waiter = rds_client.get_waiter('db_instance_available')
@@ -149,7 +154,7 @@ def get_or_create_rds_instance(sg_id):
     response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
     endpoint = response['DBInstances'][0]['Endpoint']['Address']
 
-    print(f"Banco RDS disponível. Endpoint: {endpoint}")
+    print(f"Criação do banco RDS bem sucedida. Endpoint: {endpoint}")
     return endpoint
 
 
@@ -169,7 +174,7 @@ def run_ddl_only(endpoint):
         cursor.execute(ddl_script)
         cursor.close()
         conn.close()
-        print("Criação/Verificação das tabelas bem sucedida.")
+        print("Criação das tabelas bem sucedida.")
         
     except Exception as e:
         print(f"Erro ao interagir com o banco: {e}")
@@ -177,6 +182,7 @@ def run_ddl_only(endpoint):
 
 def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
     """Cria o repositório ECR, constrói e envia a imagem"""
+
     account_id = sts_client.get_caller_identity()["Account"]
     ecr_uri = f"{account_id}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo_name}"
     
@@ -202,12 +208,15 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
     subprocess.run(["docker", "build", "-t", repo_name, "-f", str(dockerfile_path), str(context_dir)], check=True)
     subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
     subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
+
+    print(f"Build e Push da Imagem {repo_name} bem sucedidos.")
     
     return ecr_uri
 
 
 def setup_auto_scaling(service_name):
     """Configura o Auto Scaling para um serviço ECS específico"""
+
     app_autoscaling.register_scalable_target(
         ServiceNamespace='ecs',
         ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
@@ -232,9 +241,12 @@ def setup_auto_scaling(service_name):
         }
     )
 
+    print(f"Auto Scaling configurado para o serviço {service_name}.")
+
 
 def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     """Cria ALB, Target Groups, ECS Cluster e Services unificados"""
+
     account_id = sts_client.get_caller_identity()["Account"]
     role_arn = f"arn:aws:iam::{account_id}:role/LabRole" 
     
@@ -249,7 +261,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
         family=TASK_CADASTRO_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu=TASK_CPU, memory=TASK_MEMORY,
+        cpu=TASK_CADASTRO_CPU, memory=TASK_CADASTRO_MEMORY,
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "cadastro-container",
@@ -280,7 +292,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
         family=TASK_ROTAS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu="512", memory="1024",
+        cpu=TASK_ROTAS_CPU, memory=TASK_ROTAS_MEMORY,
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "rotas-container",
@@ -303,7 +315,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     subnets = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
     subnet_ids = [s['SubnetId'] for s in subnets['Subnets'][:2]]
     
-    print("Criando ALB e Listeners...")
+    print("Criando ALB e Listeners.")
     alb_response = elbv2_client.create_load_balancer(
         Name=ALB_NAME, Subnets=subnet_ids, SecurityGroups=[sg_id],
         Scheme=ALB_SCHEME, Type=ALB_TYPE, IpAddressType=ALB_IP_ADDRESS_TYPE
@@ -339,7 +351,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
         Actions=[{'Type': 'forward', 'TargetGroupArn': tg_rotas_arn}]
     )
     
-    print("Iniciando ECS Services atrelados ao ALB...")
+    print("Iniciando ECS Services atrelados ao ALB.")
     ecs_client.create_service(
         cluster=CLUSTER_NAME, serviceName="dijkfood-cadastro-service", taskDefinition=TASK_CADASTRO_FAMILY,
         desiredCount=1, launchType="FARGATE",
@@ -358,7 +370,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     setup_auto_scaling("dijkfood-cadastro-service")
     setup_auto_scaling("dijkfood-rotas-service")
     
-    print("Aguardando Serviços ficarem online...")
+    print("Aguardando Serviços ficarem online.")
     waiter = ecs_client.get_waiter('services_stable')
     waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service"])
     
@@ -374,7 +386,7 @@ def destroy_infrastructure(sg_id):
     services = ["dijkfood-cadastro-service", "dijkfood-rotas-service"]
     for svc in services:
         try:
-            ecs_client.update_service(cluster=CLUSTER_NAME, serviceName=svc, desiredCount=0)
+            ecs_client.update_service(cluster=CLUSTER_NAME, service=svc, desiredCount=0)
         except Exception:
             pass
 
@@ -382,7 +394,7 @@ def destroy_infrastructure(sg_id):
         waiter = ecs_client.get_waiter('services_stable')
         waiter.wait(cluster=CLUSTER_NAME, services=services)
         for svc in services:
-            ecs_client.delete_service(cluster=CLUSTER_NAME, serviceName=svc)
+            ecs_client.delete_service(cluster=CLUSTER_NAME, service=svc)
         ecs_client.delete_cluster(cluster=CLUSTER_NAME)
         print("Cluster e Serviços ECS apagados.")
     except Exception as e:
@@ -428,33 +440,77 @@ def main():
         print("=" * 60)
         print()
 
+        start_time = time.time()
+        print("1. Configuração dos Security Groups")
         sg_id = setup_security_group()
-        
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
+
+        start_time = time.time()
+        print("2. Configuração do Banco RDS")
         endpoint = get_or_create_rds_instance(sg_id)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
+
+        start_time = time.time()
+        print("3. Execução do DDL")
         run_ddl_only(endpoint)
-        
-        # Faz o build buscando as pastas filhas
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
+
+        start_time = time.time()
+        print("4. Build e Push das Imagens - API de Cadastro")
         ecr_uri_cadastro = build_and_push_docker_image(REPO_CADASTRO, DOCKERFILE_CADASTRO, ROOT_DIR)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
+
+        start_time = time.time()
+        print("5. Build e Push das Imagens - API de Rotas")
         ecr_uri_rotas = build_and_push_docker_image(REPO_ROTAS, DOCKERFILE_ROTAS, ROOT_DIR)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
         
+        start_time = time.time()
+        print("6. Deploy das APIs no ECS")
         alb_dns = deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, endpoint, sg_id)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
         
         env = os.environ.copy()
         env["API_URL"] = f"http://{alb_dns}"
         
+        start_time = time.time()
         print("6. População do RDS (executando seed_db.py)")
         subprocess.run(["uv", "run", "python", str(SEED_PATH)], env=env, check=True)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
         
+        start_time = time.time()
         print("7. Simulando carga no RDS (executando simulador_cadastro.py)")
         subprocess.run(["uv", "run", "python", str(SIMULADOR_PATH)], env=env)
+        end_time = time.time()
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+        print()
+
 
     except Exception as e:
         print(f"\nErro Grave no Fluxo: {e}\n")
         
     finally:
         if sg_id:
+            start_time = time.time()
             print("8. Destruição da infraestrutura")
             destroy_infrastructure(sg_id) 
+            end_time = time.time()
+            print(f"Tempo de execução: {end_time - start_time:.2f} segundos")
+            print()
 
         print("Execução do deploy.py finalizada.")
 
