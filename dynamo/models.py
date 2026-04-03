@@ -27,3 +27,8 @@ class OrderCreate(BaseModel):
 
 class OrderStatusUpdate(BaseModel):
     status: OrderStatus
+
+class DriverLocationUpdate(BaseModel):
+    lat: float
+    lng: float
+    order_id: Optional[str] = None
