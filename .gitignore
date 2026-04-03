@@ -136,8 +136,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
+# Dijkfood
+order_service/
+
 .envrc
 .venv
 env/
