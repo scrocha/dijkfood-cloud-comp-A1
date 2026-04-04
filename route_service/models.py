@@ -29,12 +29,8 @@ class Percurso(BaseModel):
 class RotaResponseData(BaseModel):
     distancia_metros: float
     nos: int
-    # Segmento do ponto de origem original ao ponto de origem reprojetado
-    percurso_inicial: Percurso
-    # Lista de percursos do caminho principal (origem reprojetada ao destino reprojetado)
+    # Lista de percursos completa (origem original ao destino original)
     percursos: List[Percurso]
-    # Segmento do ponto de destino reprojetado ao ponto de destino original
-    percurso_final: Percurso
     origem_projetada: Ponto
     destino_projetado: Ponto
 

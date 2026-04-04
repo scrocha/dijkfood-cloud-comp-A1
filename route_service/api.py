@@ -169,9 +169,7 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
     if no_origem == no_destino:
         return {
             "distancia_metros": 0.0, "nos": 1,
-            "percurso_inicial": percurso_inicial,
-            "percursos": [],
-            "percurso_final": percurso_final,
+            "percursos": [percurso_inicial, percurso_final],
             "origem_projetada": ponto_origem_proj, "destino_projetado": ponto_destino_proj
         }
 
@@ -192,9 +190,7 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
     return {
         "distancia_metros": round(comprimento, 2),
         "nos": len(caminho),
-        "percurso_inicial": percurso_inicial,
-        "percursos": segmentos,
-        "percurso_final": percurso_final,
+        "percursos": [percurso_inicial, *segmentos, percurso_final],
         "origem_projetada": ponto_origem_proj,
         "destino_projetado": ponto_destino_proj
     }
