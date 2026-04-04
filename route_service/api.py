@@ -123,8 +123,29 @@ def criar_heuristica_otimizada(no_destino: int):
     
     return calcular_heuristica
 
-def extrair_comprimento_do_caminho(G: nx.DiGraph, caminho: list) -> float:
-    return sum(G[u][v].get(EDGE_WEIGHT, 0.0) for u, v in zip(caminho[:-1], caminho[1:]))
+def calcular_distancia_haversine(ponto1: Ponto, ponto2: Ponto) -> float:
+    """Calcula a distância aproximada entre dois pontos usando projeção equirretangular."""
+    lat1 = math.radians(ponto1.lat)
+    lat2 = math.radians(ponto2.lat)
+    lon1 = math.radians(ponto1.lon)
+    lon2 = math.radians(ponto2.lon)
+    cos_lat = math.cos((lat1 + lat2) / 2.0)
+    x = (lon2 - lon1) * cos_lat
+    y = lat2 - lat1
+    return 6371000.0 * math.hypot(x, y)
+
+def extrair_segmentos_do_caminho(G: nx.DiGraph, caminho: list, node_coords: dict) -> Tuple[List[Dict], float]:
+    segmentos = []
+    comprimento_total = 0.0
+    for u, v in zip(caminho[:-1], caminho[1:]):
+        comprimento = G[u][v].get(EDGE_WEIGHT, 0.0)
+        comprimento_total += comprimento
+        segmentos.append({
+            "ponto_origem": {"lat": node_coords[u][0], "lon": node_coords[u][1]},
+            "ponto_fim": {"lat": node_coords[v][0], "lon": node_coords[v][1]},
+            "comprimento": comprimento
+        })
+    return segmentos, comprimento_total
 
 # --- Lógica Assíncrona e Endpoints ---
 
@@ -132,10 +153,25 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
     no_origem, ponto_origem_proj = await asyncio.to_thread(projetar_ponto, origem)
     no_destino, ponto_destino_proj = await asyncio.to_thread(projetar_ponto, destino)
 
+    # Segmento do ponto de origem original ao ponto de origem reprojetado
+    percurso_inicial = {
+        "ponto_origem": {"lat": origem.lat, "lon": origem.lon},
+        "ponto_fim": {"lat": ponto_origem_proj.lat, "lon": ponto_origem_proj.lon},
+        "comprimento": round(calcular_distancia_haversine(origem, ponto_origem_proj), 2)
+    }
+    # Segmento do ponto de destino reprojetado ao ponto de destino original
+    percurso_final = {
+        "ponto_origem": {"lat": ponto_destino_proj.lat, "lon": ponto_destino_proj.lon},
+        "ponto_fim": {"lat": destino.lat, "lon": destino.lon},
+        "comprimento": round(calcular_distancia_haversine(ponto_destino_proj, destino), 2)
+    }
+
     if no_origem == no_destino:
         return {
             "distancia_metros": 0.0, "nos": 1,
-            "coordenadas": [{"lat": ponto_origem_proj.lat, "lon": ponto_origem_proj.lon}],
+            "percurso_inicial": percurso_inicial,
+            "percursos": [],
+            "percurso_final": percurso_final,
             "origem_projetada": ponto_origem_proj, "destino_projetado": ponto_destino_proj
         }
 
@@ -146,17 +182,19 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
             nx.astar_path, GLOBAL_GRAPH, no_origem, no_destino, 
             heuristic=heuristica, weight=EDGE_WEIGHT
         )
-        comprimento = await asyncio.to_thread(extrair_comprimento_do_caminho, GLOBAL_GRAPH, caminho)
+        segmentos, comprimento = await asyncio.to_thread(
+            extrair_segmentos_do_caminho, GLOBAL_GRAPH, caminho, GLOBAL_NODE_COORDS
+        )
         
     except nx.NetworkXNoPath:
         return None 
 
-    coords = [{"lat": GLOBAL_NODE_COORDS[n][0], "lon": GLOBAL_NODE_COORDS[n][1]} for n in caminho]
-
     return {
         "distancia_metros": round(comprimento, 2),
         "nos": len(caminho),
-        "coordenadas": coords,
+        "percurso_inicial": percurso_inicial,
+        "percursos": segmentos,
+        "percurso_final": percurso_final,
         "origem_projetada": ponto_origem_proj,
         "destino_projetado": ponto_destino_proj
     }
