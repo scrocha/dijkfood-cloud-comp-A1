@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Dict
+from typing import List
 
 LATITUDE_RANGE = (-23.9857223, -23.3590754)
 LONGITUDE_RANGE = (-46.8253578, -46.3653906)
@@ -21,10 +21,16 @@ class RotaRequest(BaseModel):
     origem: Ponto
     destino: Ponto
 
+class Percurso(BaseModel):
+    ponto_origem: Ponto
+    ponto_fim: Ponto
+    comprimento: float
+
 class RotaResponseData(BaseModel):
     distancia_metros: float
     nos: int
-    coordenadas: List[Dict[str, float]]
+    # Lista de percursos do caminho principal (origem ao destino)
+    percursos: List[Percurso]
     origem_projetada: Ponto
     destino_projetado: Ponto
 
