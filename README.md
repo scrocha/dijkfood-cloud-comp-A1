@@ -1,91 +1,76 @@
-# dijkfood-cloud-comp-A1
+# DijkFood - Sistema de Logística de Entrega Cloud Native
 
-## `./route_service`
+Este projeto é uma plataforma de entrega de comida ("DijkFood") projetada para alta escalabilidade na AWS, utilizando uma arquitetura de microserviços, bancos de dados poliglotas (Relacional e NoSQL) e computação serverless com ECS Fargate.
 
-Nessa pasta está o serviço responsável pelo cálculo de rotas utilizando o algoritmo A* sobre o grafo de ruas de São Paulo.
+## Arquitetura e Serviços
 
-### Como Executar Localmente com Docker
+O sistema é dividido em três serviços principais:
 
-Como a API depende de um arquivo de grafo (`grafo_sp.graphml`) que pode ser baixado via `setup.py`, existem duas formas de testar localmente:
+1.  **`database_service` (PostgreSQL/RDS):** Gerencia as entidades estáticas (Usuários, Restaurantes, Entregadores, Produtos) e armazena o histórico consolidado de pedidos finalizados.
+2.  **`route_service` (FastAPI):** Calcula rotas otimizadas utilizando o algoritmo A* sobre o grafo de ruas de São Paulo (OSMNX).
+3.  **`dynamo` (DynamoDB):** Gerencia o ciclo de vida dos pedidos em tempo real. Possui lógica de:
+    *   **Máquina de Estados:** Transições rígidas de status (`CONFIRMED` -> `DELIVERED`).
+    *   **TTL (Time to Live):** Pedidos expiram do DynamoDB 48h após a entrega para manter a tabela leve.
+    *   **Sincronização Automática:** Ao atingir o status `DELIVERED`, o serviço condensa o histórico de tempos e envia para a tabela `PEDIDOS` no PostgreSQL.
 
-#### 1. Build e Execução Direta
+---
 
-Se você já tem o arquivo `grafo_sp.graphml` na pasta `route_service/`:
+## Como Executar na Nuvem (AWS)
 
-```shell
-# Build da imagem (executar na raiz do projeto)
-docker build -t dijkfood-route-service -f route_service/Dockerfile .
+O projeto possui um script de deploy unificado que provisiona toda a infraestrutura (RDS, DynamoDB, ECR, ALB, ECS, Auto Scaling) em uma única execução.
 
-# Execução do container (Puxando credenciais automáticas do seu arquivo ~/.aws/credentials)
-docker run --name route-service -p 8000:8000 \
-  -v ~/.aws:/root/.aws:ro \
-  -e AWS_PROFILE=default \
-  dijkfood-route-service
+### 1. Deploy Unificado
+A partir da raiz do repositório, execute:
+
+```bash
+uv run python deploy.py
+```
+*Este script retornará a URL do Load Balancer (ALB) ao final.*
+
+### 2. Teste de Infraestrutura e Fluxo
+Após o deploy, você pode validar se todos os serviços estão comunicando-se corretamente e se o fluxo de pedidos (Dynamo -> Postgres) está funcionando:
+
+```bash
+uv run python aleat/test_infra.py <URL_DO_ALB>
+```
+*O teste simula a criação de um pedido, atribuição de entregador e todas as mudanças de status até a entrega.*
+
+### 3. Limpeza de Recursos
+Para evitar custos desnecessários, utilize o script de destruição:
+
+*   **Modo Soft (Padrão):** Remove containers, Load Balancer e logs, mas **mantém** o RDS e o ECR (limpando apenas os dados das tabelas) para que o próximo deploy seja instantâneo.
+    ```bash
+    uv run python destroy.py
+    ```
+
+*   **Modo Hard:** Remove **absolutamente tudo**, incluindo a instância do banco de dados RDS e os repositórios de imagem.
+    ```bash
+    uv run python destroy.py --hard
+    ```
+
+---
+
+## Como Executar Localmente (Docker Compose)
+
+Para desenvolvimento rápido, você pode subir toda a infraestrutura localmente:
+
+```bash
+docker-compose up --build
 ```
 
-#### 2. Usando o setup.py para gerar o grafo e testar
+Os serviços estarão disponíveis em:
+- **Cadastro (SQL):** `http://localhost:8002`
+- **Rotas:** `http://localhost:8003`
+- **Pedidos (Dynamo):** `http://localhost:8004`
+- **DynamoDB Admin:** `http://localhost:8001` (Interface visual para o DynamoLocal)
 
-O script `setup.py` automatiza o download do grafo e o upload para o S3, além do deploy para o ECS. Para testar apenas o Docker localmente garantindo que o grafo existe:
+---
 
-```shell
-# 1. Gere o grafo localmente (requer dependências instaladas via uv)
-uv run python route_service/setup.py
+## Estrutura do Projeto
 
-# 2. Build e Run do Docker (conforme acima)
-docker build -t dijkfood-route-service -f route_service/Dockerfile .
-docker run --name route-service -p 8000:8000 dijkfood-route-service
-```
-
-A API estará disponível em `http://localhost:8000/health`.
-
-## `./database`
-
-Nessa pasta estão os scripts responsáveis pela criação do banco de dados relacional das entidades estáticas do sistema, como usuários, restaurantes, entregadores e produtos. 
-
-- `DDL.sql`: Script responsável pela criação do schema e das tabelas do banco de dados.
-- `seed_db.py`: Script responsável pela criação dos dados iniciais do banco de dados.
-- `main.py`: Script responsável por criar a API REST (FastAPI). Utiliza pool de conexões assíncronas (`asyncpg`) e possui rotas otimizadas (`/batch`) para suportar alta volumetria de inserções simultâneas.
-- `models.py`: Script responsável por definir os modelos de dados (Pydantic) que serão utilizados na API REST.
-- `simulador_cadastro.py`: Script assíncrono responsável por simular o tráfego de usuários. Utiliza a estratégia de envio em lote (Batching) para atingir alto *throughput* (+200 req/s) mantendo a latência baixa.
-- `Dockerfile`: Script responsável por criar a imagem Docker otimizada da API REST.
-- `deploy.py`: Script automatizado (`boto3`) que provisiona toda a arquitetura na AWS. Ele configura a rede (Security Groups), o banco de dados RDS (otimizado com discos `gp3`), o ECR, o Application Load Balancer (ALB) e o ECS Fargate com **Application Auto Scaling** já configurado.
-
-> [!NOTE]
-> Não é criada nenhuma instância de EC2 nem para popular a base, nem para rodar o simulador de carga. Ambos os scripts são executados localmente e comunicam-se de forma assíncrona com os recursos criados pelo `deploy.py`.
-
-### Como Executar na Nuvem (AWS)
-
-Para provisionar a infraestrutura completa na AWS, fazer o build da imagem, deploy da API e rodar o teste de carga automaticamente, execute a partir da raiz do repositório:
-
-```shell
-uv run python database/deploy.py
-```
-
-### Como Executar Localmente
-
-Para rodar a aplicação inteira no seu ambiente local (via Docker) a partir da raiz do repositório, siga os passos abaixo:
-
-```shell
-# 1. Cria e roda o banco de dados PostgreSQL
-docker run --name dijkfood-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=dijkfood -p 5432:5432 -d postgres:15
-
-# 2. Cria o schema e as tabelas (Se estiver no Windows/PowerShell)
-Get-Content database/DDL.sql | docker exec -i dijkfood-db psql -U postgres -d dijkfood
-# (Se estiver no Linux/Mac)
-cat database/DDL.sql | docker exec -i dijkfood-db psql -U postgres -d dijkfood
-
-# 3. Faz a carga inicial de dados fixos
-uv run python database/seed_db.py
-
-# 4. Cria a imagem docker da API (apontando para o contexto raiz)
-docker build -t dijkfood-api-cadastro -f database/Dockerfile . 
-
-# 5. Executa o container da API apontando para o banco local
-docker run --name api-cadastro -p 8000:8000 -e DB_HOST="host.docker.internal" -d dijkfood-api-cadastro
-
-# 6. Executa o simulador de carga para testar a performance
-uv run python database/simulador_cadastro.py
-
-# Utilidade: Conecta ao banco de dados interativamente (opcional)
-docker exec -it dijkfood-db psql -U postgres -d dijkfood
-```
+- `/database`: DDL, API de cadastro e simuladores para PostgreSQL.
+- `/dynamo`: Lógica do serviço de pedidos e integração com DynamoDB.
+- `/route_service`: Motor de cálculo de rotas e processamento de grafos.
+- `deploy.py`: Orquestrador de infraestrutura AWS (Boto3).
+- `aleat/test_infra.py`: Script de validação funcional e de conectividade.
+- `destroy.py`: Gerenciador de limpeza de ambiente.

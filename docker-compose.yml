@@ -64,10 +64,10 @@ services:
   order-service:
     build:
       context: .
-      dockerfile: order_service/Dockerfile
+      dockerfile: dynamo/Dockerfile
     container_name: order-service
     ports:
-      - "8004:8000"
+      - "8004:8002"
     environment:
       AWS_REGION: us-east-1
       DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
