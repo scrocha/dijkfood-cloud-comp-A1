@@ -27,15 +27,7 @@ uv run python deploy.py
 ```
 *Este script retornará a URL do Load Balancer (ALB) ao final.*
 
-### 2. Teste de Infraestrutura e Fluxo
-Após o deploy, você pode validar se todos os serviços estão comunicando-se corretamente e se o fluxo de pedidos (Dynamo -> Postgres) está funcionando:
-
-```bash
-uv run python aleat/test_infra.py <URL_DO_ALB>
-```
-*O teste simula a criação de um pedido, atribuição de entregador e todas as mudanças de status até a entrega.*
-
-### 3. Limpeza de Recursos
+### 2. Limpeza de Recursos
 Para evitar custos desnecessários, utilize o script de destruição:
 
 *   **Modo Soft (Padrão):** Remove containers, Load Balancer e logs, mas **mantém** o RDS e o ECR (limpando apenas os dados das tabelas) para que o próximo deploy seja instantâneo.
