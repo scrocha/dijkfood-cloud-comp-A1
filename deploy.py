@@ -14,9 +14,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent 
 DATABASE_DIR = ROOT_DIR / "database"
 ROUTE_DIR = ROOT_DIR / "route_service"
+PEDIDOS_DIR = ROOT_DIR / "dynamo"
 
 DOCKERFILE_CADASTRO = DATABASE_DIR / "Dockerfile"
 DOCKERFILE_ROTAS = ROUTE_DIR / "Dockerfile"
+DOCKERFILE_PEDIDOS = PEDIDOS_DIR / "Dockerfile"
 DDL_PATH = DATABASE_DIR / "DDL.sql"
 SEED_PATH = DATABASE_DIR / "seed_db.py"
 SIMULADOR_PATH = DATABASE_DIR / "simulador_cadastro.py"
@@ -37,10 +39,14 @@ DB_USER = "postgres"
 DB_PASSWORD = "SuperSecretPassword123!" 
 DB_PORT = 5432
 
+# configurações DynamoDB
+DYNAMODB_TABLE_NAME = "DijkfoodOrders"
+
 # configurações ECS
 CLUSTER_NAME = "dijkfood-cluster"
 TASK_CADASTRO_FAMILY = "dijkfood-cadastro-task"
 TASK_ROTAS_FAMILY = "dijkfood-rotas-task"
+TASK_PEDIDOS_FAMILY = "dijkfood-pedidos-task"
 TASK_NETWORK_MODE = "awsvpc"
 TASK_CPU = "1024"
 TASK_MEMORY = "2048"
@@ -61,14 +67,17 @@ AS_SCALE_IN_COOLDOWN = 60
 # Nomes dos Target Groups
 TG_CADASTRO_NAME = "dijkfood-tg-cadastro"
 TG_ROTAS_NAME = "dijkfood-tg-rotas"
+TG_PEDIDOS_NAME = "dijkfood-tg-pedidos"
 
 # Repositórios ECR
 REPO_CADASTRO = "dijkfood-api-cadastro"
 REPO_ROTAS = "dijkfood-api-rotas"
+REPO_PEDIDOS = "dijkfood-api-pedidos"
 
 AWS_REGION = "us-east-1"
 API_PORT_CADASTRO = 8000
 API_PORT_ROTAS = 8001
+API_PORT_PEDIDOS = 8002
 ALB_PORT = 80
 
 SG_NAME = 'dijkfood-sg-unified'
@@ -84,11 +93,12 @@ app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION
 
 
 def setup_security_group():
-    """Cria um Security Group permitindo acesso às portas necessárias"""
+    """Cria ou recupera o Security Group e garante que as portas necessárias estejam abertas"""
     print("Configurando Security Group.")
     vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
     vpc_id = vpcs['Vpcs'][0]['VpcId']
     
+    sg_id = None
     try:
         sg_response = ec2_client.create_security_group(
             GroupName=SG_NAME,
@@ -96,25 +106,43 @@ def setup_security_group():
             VpcId=vpc_id
         )
         sg_id = sg_response['GroupId']
-        
-        ec2_client.authorize_security_group_ingress(
-            GroupId=sg_id,
-            IpPermissions=[
-                {'IpProtocol': 'tcp', 'FromPort': DB_PORT, 'ToPort': DB_PORT, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]},
-                {'IpProtocol': 'tcp', 'FromPort': API_PORT_CADASTRO, 'ToPort': API_PORT_CADASTRO, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]},
-                {'IpProtocol': 'tcp', 'FromPort': API_PORT_ROTAS, 'ToPort': API_PORT_ROTAS, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]},
-                {'IpProtocol': 'tcp', 'FromPort': ALB_PORT, 'ToPort': ALB_PORT, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}
-            ]
-        )
-        print(f"Criação do Security Group '{SG_NAME}' bem sucedida.")
-        return sg_id
-
+        print(f"Security Group '{SG_NAME}' criado.")
     except ClientError as e:
         if e.response['Error']['Code'] == 'InvalidGroup.Duplicate':
-            print(f"Security Group '{SG_NAME}' já existe. Recuperando ID.")
             sgs = ec2_client.describe_security_groups(GroupNames=[SG_NAME])
-            return sgs['SecurityGroups'][0]['GroupId']
-        raise e
+            sg_id = sgs['SecurityGroups'][0]['GroupId']
+            print(f"Security Group '{SG_NAME}' já existe. ID: {sg_id}")
+        else:
+            raise e
+
+    # Lista de portas que precisam estar abertas
+    ports = [
+        (DB_PORT, "PostgreSQL"),
+        (API_PORT_CADASTRO, "API Cadastro"),
+        (API_PORT_ROTAS, "API Rotas"),
+        (API_PORT_PEDIDOS, "API Pedidos"),
+        (ALB_PORT, "Load Balancer (HTTP)")
+    ]
+
+    for port, label in ports:
+        try:
+            ec2_client.authorize_security_group_ingress(
+                GroupId=sg_id,
+                IpPermissions=[{
+                    'IpProtocol': 'tcp',
+                    'FromPort': port,
+                    'ToPort': port,
+                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                }]
+            )
+            print(f"Porta {port} ({label}) autorizada.")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidPermission.Duplicate':
+                pass # Regra já existe, podemos ignorar
+            else:
+                print(f"Aviso ao autorizar porta {port}: {e}")
+
+    return sg_id
 
 
 def get_or_create_rds_instance(sg_id):
@@ -183,20 +211,20 @@ def run_ddl_only(endpoint):
         print(f"Erro ao interagir com o banco: {e}")
 
 
-def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
+def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_client_param, sts_client_param, region):
     """Cria o repositório ECR se não existir, constrói e envia a imagem"""
-    account_id = sts_client.get_caller_identity()["Account"]
-    ecr_uri = f"{account_id}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo_name}"
+    account_id = sts_client_param.get_caller_identity()["Account"]
+    ecr_uri = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
     
     try:
         print(f"Verificando repositório ECR: {repo_name}")
-        ecr_client.create_repository(repositoryName=repo_name)
+        ecr_client_param.create_repository(repositoryName=repo_name)
     except ClientError as e:
         if e.response['Error']['Code'] != 'RepositoryAlreadyExistsException':
             raise e
 
     print(f"Autenticando Docker no ECR.")
-    auth_token = ecr_client.get_authorization_token()
+    auth_token = ecr_client_param.get_authorization_token()
     token = auth_token['authorizationData'][0]['authorizationToken']
     username, password = base64.b64decode(token).decode('utf-8').split(':')
     registry = auth_token['authorizationData'][0]['proxyEndpoint']
@@ -213,6 +241,55 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir):
     subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
     
     return ecr_uri
+
+
+def setup_dynamodb():
+    """Configura a tabela do DynamoDB se não existir"""
+    print(f"Configurando DynamoDB: {DYNAMODB_TABLE_NAME}")
+    dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+    try:
+        table = dynamodb.create_table(
+            TableName=DYNAMODB_TABLE_NAME,
+            BillingMode='PAY_PER_REQUEST',
+            AttributeDefinitions=[
+                {'AttributeName': 'PK', 'AttributeType': 'S'},
+                {'AttributeName': 'SK', 'AttributeType': 'S'},
+                {'AttributeName': 'GSI1PK', 'AttributeType': 'S'},
+                {'AttributeName': 'GSI1SK', 'AttributeType': 'S'},
+                {'AttributeName': 'GSI2PK', 'AttributeType': 'S'},
+                {'AttributeName': 'GSI2SK', 'AttributeType': 'S'},
+            ],
+            KeySchema=[
+                {'AttributeName': 'PK', 'KeyType': 'HASH'},
+                {'AttributeName': 'SK', 'KeyType': 'RANGE'}
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'UserIndex',
+                    'KeySchema': [
+                        {'AttributeName': 'GSI1PK', 'KeyType': 'HASH'},
+                        {'AttributeName': 'GSI1SK', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'}
+                },
+                {
+                    'IndexName': 'StatusIndex',
+                    'KeySchema': [
+                        {'AttributeName': 'GSI2PK', 'KeyType': 'HASH'},
+                        {'AttributeName': 'GSI2SK', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'}
+                }
+            ]
+        )
+        print(f"Aguardando criação da tabela {DYNAMODB_TABLE_NAME}...")
+        table.meta.client.get_waiter('table_exists').wait(TableName=DYNAMODB_TABLE_NAME)
+        print("Tabela criada com sucesso.")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceInUseException':
+            print(f"Tabela {DYNAMODB_TABLE_NAME} já existe.")
+        else:
+            raise e
 
 
 def setup_auto_scaling(service_name):
@@ -242,7 +319,7 @@ def setup_auto_scaling(service_name):
     )
 
 
-def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
+def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpoint, sg_id):
     """Cria ALB, Target Groups, ECS Cluster e Services unificados"""
     account_id = sts_client.get_caller_identity()["Account"]
     role_arn = f"arn:aws:iam::{account_id}:role/LabRole" 
@@ -306,6 +383,34 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
             }
         }]
     )
+
+    print("Registrando Task Definition de Pedidos.")
+    ecs_client.register_task_definition(
+        family=TASK_PEDIDOS_FAMILY,
+        networkMode=TASK_NETWORK_MODE,
+        requiresCompatibilities=["FARGATE"],
+        cpu=TASK_CPU, memory=TASK_MEMORY,
+        executionRoleArn=role_arn, taskRoleArn=role_arn,
+        containerDefinitions=[{
+            "name": "pedidos-container",
+            "image": f"{ecr_uri_pedidos}:latest",
+            "portMappings": [{"containerPort": API_PORT_PEDIDOS, "hostPort": API_PORT_PEDIDOS}],
+            "environment": [
+                {"name": "AWS_REGION", "value": AWS_REGION},
+                {"name": "DYNAMODB_TABLE_NAME", "value": DYNAMODB_TABLE_NAME},
+                {"name": "ROOT_PATH", "value": "/pedidos"}
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": f"/ecs/{REPO_PEDIDOS}",
+                    "awslogs-region": AWS_REGION,
+                    "awslogs-stream-prefix": "ecs",
+                    "awslogs-create-group": "true"
+                }
+            }
+        }]
+    )
     
     vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
     vpc_id = vpcs['Vpcs'][0]['VpcId']
@@ -335,7 +440,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
     try:
         tg_cad_resp = elbv2_client.create_target_group(
             Name=TG_CADASTRO_NAME, Protocol='HTTP', Port=API_PORT_CADASTRO, VpcId=vpc_id, TargetType='ip',
-            HealthCheckProtocol='HTTP', HealthCheckPath='/docs', HealthCheckIntervalSeconds=30
+            HealthCheckProtocol='HTTP', HealthCheckPath='/cadastro/health', HealthCheckIntervalSeconds=30
         )
         tg_cad_arn = tg_cad_resp['TargetGroups'][0]['TargetGroupArn']
     except ClientError as e:
@@ -358,6 +463,20 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
             tg_rotas_arn = tgs['TargetGroups'][0]['TargetGroupArn']
         else:
             raise e
+
+    # Target Group Pedidos
+    try:
+        tg_ped_resp = elbv2_client.create_target_group(
+            Name=TG_PEDIDOS_NAME, Protocol='HTTP', Port=API_PORT_PEDIDOS, VpcId=vpc_id, TargetType='ip',
+            HealthCheckProtocol='HTTP', HealthCheckPath='/pedidos/health', HealthCheckIntervalSeconds=30
+        )
+        tg_ped_arn = tg_ped_resp['TargetGroups'][0]['TargetGroupArn']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+            tgs = elbv2_client.describe_target_groups(Names=[TG_PEDIDOS_NAME])
+            tg_ped_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+        else:
+            raise e
     
     # Listener
     listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
@@ -370,14 +489,25 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
         )
         listener_arn = listener_resp['Listeners'][0]['ListenerArn']
     
-    # Rule
+    # Rules
     rules = elbv2_client.describe_rules(ListenerArn=listener_arn)['Rules']
+    
+    # Regra Rotas
     if not any(r.get('Priority') == '10' for r in rules):
         elbv2_client.create_rule(
             ListenerArn=listener_arn,
             Conditions=[{'Field': 'path-pattern', 'Values': ['/rotas*', '/route*']}],
             Priority=10,
             Actions=[{'Type': 'forward', 'TargetGroupArn': tg_rotas_arn}]
+        )
+
+    # Regra Pedidos
+    if not any(r.get('Priority') == '20' for r in rules):
+        elbv2_client.create_rule(
+            ListenerArn=listener_arn,
+            Conditions=[{'Field': 'path-pattern', 'Values': ['/pedidos*']}],
+            Priority=20,
+            Actions=[{'Type': 'forward', 'TargetGroupArn': tg_ped_arn}]
         )
     
     print("Iniciando/Atualizando ECS Services.")
@@ -420,12 +550,13 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, db_endpoint, sg_id):
 
     create_or_update_service("dijkfood-cadastro-service", TASK_CADASTRO_FAMILY, tg_cad_arn, "cadastro-container", API_PORT_CADASTRO)
     create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS)
+    create_or_update_service("dijkfood-pedidos-service", TASK_PEDIDOS_FAMILY, tg_ped_arn, "pedidos-container", API_PORT_PEDIDOS)
     
     print("Aguardando Serviços ficarem online.")
     waiter = ecs_client.get_waiter('services_stable')
-    waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service"])
+    waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"])
     
-    print(f"Deploy Unificado Concluído! \nAPI Cadastro (Base): http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas (ou /route)")
+    print(f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos")
     return alb_dns
 
 
@@ -434,7 +565,7 @@ def destroy_infrastructure():
     print("Iniciando a destruição dos recursos AWS (Mantendo Banco de Dados vivo).")
     
     # 1. Destruir ECS Services e Cluster
-    services = ["dijkfood-cadastro-service", "dijkfood-rotas-service"]
+    services = ["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"]
     for svc in services:
         try:
             ecs_client.update_service(cluster=CLUSTER_NAME, service=svc, desiredCount=0)
@@ -482,7 +613,7 @@ def destroy_infrastructure():
 
     # 3. Destruir Target Groups
     try:
-        tgs = elbv2_client.describe_target_groups(Names=[TG_CADASTRO_NAME, TG_ROTAS_NAME])
+        tgs = elbv2_client.describe_target_groups(Names=[TG_CADASTRO_NAME, TG_ROTAS_NAME, TG_PEDIDOS_NAME])
         for tg in tgs['TargetGroups']:
             elbv2_client.delete_target_group(TargetGroupArn=tg['TargetGroupArn'])
         print("Target Groups apagados.")
@@ -490,14 +621,14 @@ def destroy_infrastructure():
         pass
 
     # 4. Destruir ECRs
-    for repo in [REPO_CADASTRO, REPO_ROTAS]:
+    for repo in [REPO_CADASTRO, REPO_ROTAS, REPO_PEDIDOS]:
         try:
             ecr_client.delete_repository(repositoryName=repo, force=True)
             print(f"ECR {repo} apagado.")
         except Exception:
             pass
         
-    print("Destruição dos serviços conectores finalizada! O Banco RDS e o Security Group foram MANTIDOS para economizar tempo no próximo deploy.")
+    print("Destruição dos serviços conectores finalizada! O Banco RDS e o Security Group foram MANTIDOS.")
 
 
 def main():
@@ -512,38 +643,30 @@ def main():
         
         endpoint = get_or_create_rds_instance(sg_id)
         run_ddl_only(endpoint)
+
+        setup_dynamodb()
         
         # Faz o build buscando as pastas filhas
-        ecr_uri_cadastro = build_and_push_docker_image(REPO_CADASTRO, DOCKERFILE_CADASTRO, ROOT_DIR)
-        ecr_uri_rotas = build_and_push_docker_image(REPO_ROTAS, DOCKERFILE_ROTAS, ROOT_DIR)
+        ecr_uri_cadastro = build_and_push_docker_image(REPO_CADASTRO, DOCKERFILE_CADASTRO, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
+        ecr_uri_rotas = build_and_push_docker_image(REPO_ROTAS, DOCKERFILE_ROTAS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
+        ecr_uri_pedidos = build_and_push_docker_image(REPO_PEDIDOS, DOCKERFILE_PEDIDOS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
         
-        alb_dns = deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, endpoint, sg_id)
+        alb_dns = deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, endpoint, sg_id)
         
-        env = os.environ.copy()
-        env["API_URL"] = f"http://{alb_dns}"
-        
-        # print("6. População do RDS (executando seed_db.py)")
-        # subprocess.run(["uv", "run", "python", str(SEED_PATH)], env=env, check=True)
-        
-        # print("7. Simulando carga no RDS (executando simulador_cadastro.py)")
-        # subprocess.run(["uv", "run", "python", str(SIMULADOR_PATH)], env=env)
-
         print("\n" + "=" * 60)
         print("DEPLOY FINALIZADO COM SUCESSO")
         print("=" * 60)
-        print(f"API Cadastro Health: http://{alb_dns}/docs")
+        print(f"API Cadastro Health: http://{alb_dns}/cadastro/health")
         print(f"API Rotas Health:    http://{alb_dns}/rotas/health")
+        print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health")
         print("=" * 60)
 
     except Exception as e:
         print(f"\nErro Grave no Fluxo: {e}\n")
+        import traceback
+        traceback.print_exc()
         
     finally:
-        if sg_id:
-            # print("8. Destruição da infraestrutura")
-            # destroy_infrastructure()
-            pass
-
         print("Execução do deploy.py finalizada.")
 
 if __name__ == "__main__":

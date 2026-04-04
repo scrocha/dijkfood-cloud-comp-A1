@@ -27,6 +27,7 @@ class OrderCreate(BaseModel):
 
 class OrderStatusUpdate(BaseModel):
     status: OrderStatus
+    entregador_id: Optional[str] = None
 
 class DriverLocationUpdate(BaseModel):
     lat: float

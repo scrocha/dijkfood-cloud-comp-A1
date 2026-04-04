@@ -136,8 +136,7 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Dijkfood
-order_service/
+/aleat
 
 .envrc
 .venv

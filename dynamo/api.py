@@ -37,7 +37,7 @@ def get_order_history(order_id: str):
 @app.patch("/pedidos/orders/{order_id}/status")
 def update_status(order_id: str, update: OrderStatusUpdate):
     try:
-        success = order_repo.update_status(order_id, update.status)
+        success = order_repo.update_status(order_id, update.status, update.entregador_id)
         if not success:
             raise HTTPException(status_code=400, detail="Erro ao atualizar status.")
         return {"message": f"Status atualizado para {update.status}"}

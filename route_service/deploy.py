@@ -40,8 +40,8 @@ def setup_security_group():
             GroupId=sg_id,
             IpPermissions=[{
                 'IpProtocol': 'tcp',
-                'FromPort': 8000,
-                'ToPort': 8000,
+                'FromPort': 8001,
+                'ToPort': 8001,
                 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
             }]
         )
