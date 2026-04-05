@@ -8,10 +8,19 @@ import { useOrderPolling } from "../hooks/useOrderPolling";
 import { useRestaurants } from "../hooks/useRestaurants";
 import { useRunOrderDemo } from "../hooks/useRunOrderDemo";
 import { readSession, clearSession, type DemoSession } from "../session/demoSession";
+import type { OrderStatus } from "../api/pedidos";
 
-function formatLoc(loc: { lat: string; lng: string; updated_at?: string } | null): string {
+/** Só faz sentido mostrar/poller GPS depois disto — antes ainda é cozinha. */
+const DRIVER_TRACKING_STATUSES: OrderStatus[] = [
+  "READY_FOR_PICKUP",
+  "PICKED_UP",
+  "IN_TRANSIT",
+  "DELIVERED",
+];
+
+function formatLoc(loc: { lat: string; lng: string } | null): string {
   if (!loc) return "—";
-  return `lat ${loc.lat}, lng ${loc.lng}${loc.updated_at ? ` · ${loc.updated_at}` : ""}`;
+  return `lat ${loc.lat}, lng ${loc.lng}`;
 }
 
 export function AppPage() {
@@ -26,10 +35,12 @@ export function AppPage() {
   const { runDemo, phase, busy, error: simErr, setError: setSimErr, cancel } = useRunOrderDemo();
 
   const { order, error: pollErr } = useOrderPolling(orderId, POLL_ORDER_MS, !!orderId);
+  const trackDriver =
+    !!orderId && !!entregador && !!order && DRIVER_TRACKING_STATUSES.includes(order.status);
   const { loc: driverLoc } = useDriverLocationPolling(
     entregador?.entregador_id ?? null,
     POLL_DRIVER_MS,
-    !!orderId && !!entregador
+    trackDriver
   );
 
   const restaurant = useMemo(() => restaurants.find((r) => r.rest_id === restId), [restaurants, restId]);
