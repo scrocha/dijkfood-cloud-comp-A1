@@ -12,6 +12,9 @@ export function useOrderPolling(orderId: string | null, intervalMs: number, enab
       return;
     }
 
+    /* Evita mostrar status do pedido anterior com o UUID novo no ecrã. */
+    setOrder(null);
+
     let cancelled = false;
     const tick = async () => {
       try {

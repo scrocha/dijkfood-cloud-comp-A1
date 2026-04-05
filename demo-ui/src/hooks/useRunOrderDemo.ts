@@ -22,6 +22,7 @@ export function useRunOrderDemo() {
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
+    setPhase("");
   }, []);
 
   const runDemo = useCallback(async (params: RunDemoParams): Promise<void> => {
@@ -50,7 +51,10 @@ export function useRunOrderDemo() {
         onPhase: setPhase,
       });
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof DOMException && e.name === "AbortError") {
+        setPhase("");
+        return;
+      }
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);

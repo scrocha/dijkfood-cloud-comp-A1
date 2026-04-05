@@ -31,16 +31,29 @@ export function AppPage() {
   const [orderId, setOrderId] = useState<string | null>(null);
 
   const { list: restaurants, loading: lr, error: er } = useRestaurants();
-  const { first: entregador, loading: le, error: ee } = useEntregadores();
+  const { list: entregadores, first: entregador, loading: le, error: ee } = useEntregadores();
   const { runDemo, phase, busy, error: simErr, setError: setSimErr, cancel } = useRunOrderDemo();
 
   const { order, error: pollErr } = useOrderPolling(orderId, POLL_ORDER_MS, !!orderId);
-  const trackDriver =
-    !!orderId && !!entregador && !!order && DRIVER_TRACKING_STATUSES.includes(order.status);
+
+  /**
+   * Nome/coords do entregador só após READY_FOR_PICKUP (cozinha não envolve entregador na demo).
+   * Com `order` mas CONFIRMED/PREPARING → "—", igual ao GPS.
+   */
+  const showEntregadorNoAcompanhamento =
+    !!orderId && !!order && DRIVER_TRACKING_STATUSES.includes(order.status);
+  const effectiveEntregadorId = showEntregadorNoAcompanhamento
+    ? order!.entregador_id ?? entregador?.entregador_id ?? null
+    : null;
+  const entregadorDaVista = useMemo(() => {
+    if (!effectiveEntregadorId) return null;
+    return entregadores.find((e) => e.entregador_id === effectiveEntregadorId) ?? null;
+  }, [entregadores, effectiveEntregadorId]);
+
   const { loc: driverLoc } = useDriverLocationPolling(
-    entregador?.entregador_id ?? null,
+    effectiveEntregadorId,
     POLL_DRIVER_MS,
-    trackDriver
+    !!effectiveEntregadorId
   );
 
   const restaurant = useMemo(() => restaurants.find((r) => r.rest_id === restId), [restaurants, restId]);
@@ -78,6 +91,8 @@ export function AppPage() {
         qtd: 1,
       },
     ];
+
+    setOrderId(null);
 
     await runDemo({
       customerId: sess.userId,
@@ -159,7 +174,11 @@ export function AppPage() {
         </p>
         <p>
           <span className="muted">Entregador</span>{" "}
-          {entregador ? `${entregador.nome} (${entregador.entregador_id})` : "—"}
+          {entregadorDaVista
+            ? `${entregadorDaVista.nome} (${entregadorDaVista.entregador_id})`
+            : effectiveEntregadorId
+              ? `(id na API) ${effectiveEntregadorId}`
+              : "—"}
         </p>
         <p className="mono">{formatLoc(driverLoc)}</p>
       </div>
