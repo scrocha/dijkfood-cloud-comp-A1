@@ -57,24 +57,45 @@ async def run_order(client: httpx.AsyncClient, config: Config, pop: PopData) -> 
     )
 
     # 4. Calcular rota
-    resp_rota = await hc.request(
+    resp_rota, _ = await hc.request_raw(
         client, "POST", f"{config.rotas_url}/rotas/rota-entrega", "route_entrega",
         json={"origem": {"lat": rest.lat, "lon": rest.lon}, "destino": {"lat": user_lat, "lon": user_lon}},
     )
-    distancia = resp_rota["dados_rota"]["distancia_metros"]
-    t_seg = (distancia / config.delivery_speed_mps) * config.delivery_time_multiplier
+    if "dados_rota" in resp_rota:
+        distancia = resp_rota["dados_rota"]["distancia_metros"]
+        t_seg = (distancia / config.delivery_speed_mps) * config.delivery_time_multiplier
+    else:
+        distancia = 0
+        t_seg = float(random.randint(180, 300))
+        print(f"    [rota] sem caminho viário → fallback T_seg={t_seg:.0f}s")
     n_puts = max(1, int(t_seg / 0.1))
-    print(f"    [entrega] distancia={distancia:.0f}m | T_seg={t_seg:.1f}s | {n_puts} PUTs de localização")
+    eta_min, eta_sec = divmod(int(t_seg), 60)
+    print(f"    [entrega] distancia={distancia:.0f}m | ETA={eta_min}m{eta_sec:02d}s | {n_puts} PUTs de localização")
 
-    # 5. Loop de localização (100ms)
+    # 5. Loop de localização (100ms) — imprime apenas o 1º PUT e depois contador a cada 60s
+    url_loc = f"{config.pedidos_url}/pedidos/drivers/{driver_id}/location"
+    puts_por_minuto = 600  # 1 PUT / 100ms = 10/s = 600/min
+    last_report = 0
+
     for i in range(n_puts):
         frac = i / n_puts
         lat = rest.lat + (user_lat - rest.lat) * frac
         lon = rest.lon + (user_lon - rest.lon) * frac
-        await hc.request(
-            client, "PUT", f"{config.pedidos_url}/pedidos/drivers/{driver_id}/location", "location_put",
+
+        silent = i > 0  # só imprime o primeiro
+        _, lat_ms = await hc.request_raw(
+            client, "PUT", url_loc, "location_put",
             json={"lat": lat, "lng": lon, "order_id": order_id},
+            silent=silent,
         )
+
+        # Contador a cada ~60s (600 PUTs)
+        if i > 0 and i % puts_por_minuto == 0:
+            restante = (n_puts - i) * 0.1
+            r_min, r_sec = divmod(int(restante), 60)
+            print(f"    [location] {i}/{n_puts} PUTs enviados | faltam ~{r_min}m{r_sec:02d}s")
+            last_report = i
+
         await asyncio.sleep(0.1)
 
     # 6. DELIVERED
