@@ -1,0 +1,161 @@
+:root {
+  --bg: #f6f5f2;
+  --fg: #1a1a1a;
+  --muted: #5c5c5c;
+  --accent: #c45c26;
+  --border: #ddd;
+  --card: #fff;
+  --err: #b00020;
+  font-family: "Georgia", "Times New Roman", serif;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.layout {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.layout nav {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  font-size: 0.95rem;
+}
+
+.layout nav a {
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.layout nav a:hover {
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: normal;
+  margin: 0 0 1rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+  font-weight: normal;
+  margin: 2rem 0 0.75rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+label {
+  display: block;
+  margin: 0.5rem 0 0.25rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+button {
+  cursor: pointer;
+  margin-top: 0.75rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.err {
+  color: var(--err);
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.admin-nav-field label {
+  display: block;
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.admin-nav-field select {
+  min-width: 12rem;
+  width: auto;
+}
+
+.admin-grid {
+  display: grid;
+  gap: 1.5rem;
+}
+
+@media (min-width: 700px) {
+  .admin-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
