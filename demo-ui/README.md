@@ -1,36 +1,62 @@
-# DijkFood — interface demo (React)
+# DijkFood Demo UI
 
-SPA mínima para demonstrar cadastro por nome, um pedido com simulação de status e painel admin parcial.
+Interface de demonstração do sistema DijkFood. Permite fazer pedidos, acompanhar status e simular o fluxo completo de entrega.
 
 ## Pré-requisitos
 
 - Node.js 18+
-- Backend via Docker Compose: `database-service` (8002), `route-service` (8003), `order-service` (8004), Postgres e DynamoDB local.
+- npm
 
-## Desenvolvimento
+## Instalação
 
 ```bash
 cd demo-ui
 npm install
+```
+
+## Configuração do backend
+
+Edite (ou crie) o arquivo `demo-ui/.env`:
+
+### Opção 1 — AWS (ALB)
+
+```env
+VITE_BACKEND_TARGET=aws
+VITE_CADASTRO_URL=http://<seu-alb>.us-east-1.elb.amazonaws.com
+VITE_ROTAS_URL=http://<seu-alb>.us-east-1.elb.amazonaws.com
+VITE_PEDIDOS_URL=http://<seu-alb>.us-east-1.elb.amazonaws.com
+```
+
+### Opção 2 — Docker local
+
+```env
+VITE_BACKEND_TARGET=docker
+```
+
+O Vite faz proxy automático para `8002` (cadastro), `8003` (rotas) e `8004` (pedidos). Não é preciso preencher as `VITE_*_URL`.
+
+## Rodando
+
+```bash
 npm run dev
 ```
 
-Abrir http://localhost:5173 — o Vite faz proxy de `/cadastro`, `/rotas` e `/pedidos` para as portas locais (sem CORS).
+Acesse [http://localhost:5173](http://localhost:5173). Após mudar o `.env`, reinicie o `npm run dev`.
 
-Copie `.env.example` para `.env` e use **`VITE_BACKEND_TARGET`**:
+## Seed de dados (AWS)
 
-- `docker` (padrão): pedidos relativos; só precisa do Compose nas portas 8002–8004.
-- `aws`: defina também `VITE_CADASTRO_URL`, `VITE_ROTAS_URL` e `VITE_PEDIDOS_URL` (origem sem barra final).
-
-## Identificação por nome
-
-O nome digitado é convertido em `user_id` (slug). Dois nomes que geram o mesmo slug partilham a conta (aceitável para demo).
-
-## Build
+Antes da primeira demo na AWS, cadastre os dados iniciais a partir da raiz do projeto:
 
 ```bash
-npm run build
-npm run preview
+python seed_aws_demo.py
 ```
 
-No build, use `VITE_BACKEND_TARGET=aws` e as três `VITE_*_URL`, ou sirva `dist/` no mesmo host que o ALB com `VITE_BACKEND_TARGET=docker` e caminhos relativos.
+Isso cria 3 usuários, 3 restaurantes e 3 entregadores. Os IDs de usuário para logar no front são:
+`demo-usuario-1`, `demo-usuario-2`, `demo-usuario-3`.
+
+## Fluxo da demo
+
+1. **Home** — informe seu nome para entrar (deve existir no cadastro)
+2. **Fazer pedido** — escolha restaurante e item, clique em "Fazer pedido"
+3. **Acompanhamento** — status e localização do entregador atualizam automaticamente
+4. **Admin** — cadastre novos restaurantes e entregadores antes da demo

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import asyncpg
 from contextlib import asynccontextmanager
@@ -34,6 +35,12 @@ async def lifespan(app: FastAPI):
         await app.state.pool.close()
 
 app = FastAPI(title="DijkFood - API de Cadastro", description="Gerencia as Entidades Estáticas e Pedidos", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # dependência para pegar uma conexão do pool asyncpg
 async def get_db_connection():
