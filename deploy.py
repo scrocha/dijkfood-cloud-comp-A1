@@ -58,7 +58,7 @@ ALB_TYPE = "application"
 ALB_IP_ADDRESS_TYPE = "ipv4" 
 
 # configurações auto scaling
-AS_MIN_CAPACITY = 1
+AS_MIN_CAPACITY = 2
 AS_MAX_CAPACITY = 10
 AS_TARGET_VALUE = 70.0
 AS_SCALE_OUT_COOLDOWN = 60
@@ -531,7 +531,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
                 print(f"Criando novo serviço '{service_name}'.")
                 ecs_client.create_service(
                     cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
-                    desiredCount=1, launchType="FARGATE",
+                    desiredCount=3, launchType="FARGATE",
                     networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
                     loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
                 )

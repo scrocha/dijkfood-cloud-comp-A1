@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import asyncpg
 from contextlib import asynccontextmanager
@@ -34,6 +35,12 @@ async def lifespan(app: FastAPI):
         await app.state.pool.close()
 
 app = FastAPI(title="DijkFood - API de Cadastro", description="Gerencia as Entidades Estáticas e Pedidos", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # dependência para pegar uma conexão do pool asyncpg
 async def get_db_connection():
@@ -52,6 +59,17 @@ async def health_check():
 # ==================================================
 # USUÁRIOS
 # ==================================================
+
+@app.get("/cadastro/usuarios", response_model=List[Usuario])
+async def listar_usuarios(conn = Depends(get_db_connection)):
+    """Lista todos os usuarios."""
+    try:
+        query = f"SELECT * FROM {SCHEMA}.USUARIO ORDER BY PRIMEIRO_NOME, USER_ID"
+        registros = await conn.fetch(query)
+        return [dict(registro) for registro in registros]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/cadastro/usuarios", status_code=201)
 async def cadastrar_usuario(usuario: Usuario, conn = Depends(get_db_connection)):
