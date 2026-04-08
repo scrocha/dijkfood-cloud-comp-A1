@@ -213,3 +213,6 @@ cache/
 *.pkl
 
 artifacts/carga
+
+alb_endpoints.json
+

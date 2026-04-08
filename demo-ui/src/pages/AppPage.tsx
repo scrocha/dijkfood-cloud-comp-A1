@@ -1,15 +1,16 @@
-import { useMemo, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
-import { MOCK_PRODUCTS } from "../config/mockProducts";
+import type { OrderStatus } from "../api/pedidos";
+import { postRotaEntrega, type RotaEntregaResponse } from "../api/rotas";
+import { DriverMap } from "../components/DriverMap";
 import { POLL_DRIVER_MS, POLL_ORDER_MS } from "../config/demoTiming";
+import { MOCK_PRODUCTS } from "../config/mockProducts";
 import { useDriverLocationPolling } from "../hooks/useDriverLocationPolling";
 import { useEntregadores } from "../hooks/useEntregadores";
 import { useOrderPolling } from "../hooks/useOrderPolling";
 import { useRestaurants } from "../hooks/useRestaurants";
 import { useRunOrderDemo } from "../hooks/useRunOrderDemo";
-import { readSession, clearSession, type DemoSession } from "../session/demoSession";
-import type { OrderStatus } from "../api/pedidos";
-import { DriverMap } from "../components/DriverMap";
+import { clearSession, readSession, type DemoSession } from "../session/demoSession";
 
 /** Só faz sentido mostrar/poller GPS depois disto — antes ainda é cozinha. */
 const DRIVER_TRACKING_STATUSES: OrderStatus[] = [
@@ -26,12 +27,28 @@ export function AppPage() {
   const [restId, setRestId] = useState("");
   const [productIdx, setProductIdx] = useState(0);
   const [orderId, setOrderId] = useState<string | null>(null);
+  const [route, setRoute] = useState<RotaEntregaResponse | null>(null);
 
   const { list: restaurants, loading: lr, error: er } = useRestaurants();
   const { list: entregadores, first: entregador, loading: le, error: ee } = useEntregadores();
   const { runDemo, phase, busy, error: simErr, setError: setSimErr, cancel } = useRunOrderDemo();
 
   const { order, error: pollErr } = useOrderPolling(orderId, POLL_ORDER_MS, !!orderId);
+
+  // Busca rota quando restaurante é selecionado ou troca
+  useEffect(() => {
+    if (session && restId && restaurants.length > 0) {
+      const r = restaurants.find(res => res.rest_id === restId);
+      if (r) {
+        postRotaEntrega(
+          { lat: r.endereco_latitude, lon: r.endereco_longitude },
+          { lat: session.lat, lon: session.lng }
+        ).then(setRoute).catch(console.error);
+      }
+    } else {
+      setRoute(null);
+    }
+  }, [restId, restaurants, session]);
 
   /**
    * Nome/coords do entregador só após READY_FOR_PICKUP (cozinha não envolve entregador na demo).
@@ -52,6 +69,60 @@ export function AppPage() {
     POLL_DRIVER_MS,
     !!effectiveEntregadorId
   );
+
+  const routePoints = useMemo(() => {
+    if (!route) return [];
+    const pts: { lat: number; lng: number }[] = [];
+    route.dados_rota.percursos.forEach(p => {
+      pts.push({ lat: p.ponto_origem.lat, lng: p.ponto_origem.lon });
+      pts.push({ lat: p.ponto_fim.lat, lng: p.ponto_fim.lon });
+    });
+    return pts;
+  }, [route]);
+
+  /**
+   * Cálculo da distância Euclidiana simples para estimativa de progresso na rota.
+   * Em uma aplicação real, usaríamos a projeção do ponto no grafo.
+   */
+  const remainingDistance = useMemo(() => {
+    if (!route || !order || !driverLoc) return null;
+    if (order.status === "DELIVERED") return 0;
+
+    const dLat = Number(driverLoc.lat);
+    const dLng = Number(driverLoc.lng);
+    const percursos = route.dados_rota.percursos;
+
+    if (percursos.length === 0) return 0;
+
+    // Encontra o segmento mais próximo do entregador
+    let minIdx = 0;
+    let minDist = Infinity;
+
+    for (let i = 0; i < percursos.length; i++) {
+      // Distância do entregador ao início do segmento
+      const lat = percursos[i].ponto_origem.lat;
+      const lon = percursos[i].ponto_origem.lon;
+      const dist = Math.sqrt(Math.pow(lat - dLat, 2) + Math.pow(lon - dLng, 2));
+      if (dist < minDist) {
+        minDist = dist;
+        minIdx = i;
+      }
+    }
+
+    // Soma as distâncias de todos os segmentos a partir do atual
+    let totalRestante = 0;
+    for (let i = minIdx; i < percursos.length; i++) {
+      totalRestante += percursos[i].comprimento;
+    }
+
+    return totalRestante;
+  }, [route, order, driverLoc]);
+
+  const formatDistance = (metros: number | null) => {
+    if (metros === null) return "—";
+    if (metros >= 1000) return `${(metros / 1000).toFixed(2)} km`;
+    return `${Math.round(metros)} m`;
+  };
 
   const restaurant = useMemo(() => restaurants.find((r) => r.rest_id === restId), [restaurants, restId]);
 
@@ -99,6 +170,7 @@ export function AppPage() {
       restaurant: { lat: restaurant.endereco_latitude, lon: restaurant.endereco_longitude },
       customer: { lat: sess.lat, lon: sess.lng },
       entregadorId: entregador.entregador_id,
+      entregadorPos: { lat: entregador.endereco_latitude, lon: entregador.endereco_longitude },
       onOrderCreated: (id) => setOrderId(id),
     });
   }
@@ -157,32 +229,47 @@ export function AppPage() {
       <div className="card">
         <h2>Acompanhamento</h2>
         {pollErr ? <p className="err">{pollErr}</p> : null}
-        <p>
-          <span className="muted">Pedido</span>{" "}
-          <span className="mono">{orderId ?? "—"}</span>
-        </p>
-        <p>
-          <span className="muted">Status (API)</span>{" "}
-          <strong>{order?.status ?? "—"}</strong>
-        </p>
-        <p>
-          <span className="muted">Fase (simulação)</span>{" "}
-          {phase || "—"}
-        </p>
-        <p>
-          <span className="muted">Entregador</span>{" "}
-          {entregadorDaVista
-            ? `${entregadorDaVista.nome} (${entregadorDaVista.entregador_id})`
-            : effectiveEntregadorId
-              ? `(id na API) ${effectiveEntregadorId}`
-              : "—"}
-        </p>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+          <div>
+            <p>
+              <span className="muted">Pedido</span>{" "}
+              <span className="mono">{orderId ?? "—"}</span>
+            </p>
+            <p>
+              <span className="muted">Status (API)</span>{" "}
+              <strong style={{ color: "var(--primary)" }}>{order?.status ?? "—"}</strong>
+            </p>
+            <p>
+              <span className="muted">Fase (simulação)</span>{" "}
+              {phase || "—"}
+            </p>
+          </div>
+          <div>
+            <p>
+              <span className="muted">Entregador</span>{" "}
+              {entregadorDaVista
+                ? `${entregadorDaVista.nome}`
+                : effectiveEntregadorId
+                  ? `ID: ${effectiveEntregadorId}`
+                  : "—"}
+            </p>
+            {remainingDistance !== null && (
+              <p>
+                <span className="muted">Distância restante</span>{" "}
+                <strong>{formatDistance(remainingDistance)}</strong>
+              </p>
+            )}
+          </div>
+        </div>
+
         <DriverMap
           driver={driverLoc ? { lat: Number(driverLoc.lat), lng: Number(driverLoc.lng) } : null}
           restaurant={restaurant ? { lat: restaurant.endereco_latitude, lng: restaurant.endereco_longitude } : null}
           customer={{ lat: sess.lat, lng: sess.lng }}
           driverName={entregadorDaVista?.nome}
           restaurantName={restaurant?.nome}
+          routePoints={routePoints}
         />
       </div>
 

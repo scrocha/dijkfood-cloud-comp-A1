@@ -11,6 +11,7 @@ export type RunDemoParams = {
   restaurant: Ponto;
   customer: Ponto;
   entregadorId: string;
+  entregadorPos: Ponto;
   onOrderCreated: (orderId: string) => void;
 };
 
@@ -47,6 +48,7 @@ export function useRunOrderDemo() {
         restaurant: params.restaurant,
         customer: params.customer,
         entregadorId: params.entregadorId,
+        entregadorPos: params.entregadorPos,
         signal: ac.signal,
         onPhase: setPhase,
       });

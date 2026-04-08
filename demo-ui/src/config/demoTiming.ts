@@ -8,9 +8,9 @@ export const POLL_ORDER_MS = 2500;
 export const POLL_DRIVER_MS = 1200;
 
 /** Intervalo entre PUTs de localização (demo; simulador usa ~100 ms). */
-export const LOCATION_TICK_MS = 200;
+export const LOCATION_TICK_MS = 100;
 
-export const DELIVERY_SPEED_MPS = 50;
+export const DELIVERY_SPEED_MPS = 40;
 export const DELIVERY_TIME_MULTIPLIER = 1;
 
 /** Fallback se rota retornar 404 (segundos). */

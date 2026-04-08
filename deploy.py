@@ -3,14 +3,15 @@ from botocore.exceptions import ClientError
 import time
 import psycopg2
 import subprocess
-import os
+import json
 import base64
+import json
+import hashlib
 from pathlib import Path
 
 # =========================================================================
 # CONFIGURAÇÃO DE CAMINHOS (BLINDADA)
 # =========================================================================
-# Assumindo que este deploy.py está sendo rodado na raiz do projeto
 ROOT_DIR = Path(__file__).resolve().parent 
 DATABASE_DIR = ROOT_DIR / "database"
 ROUTE_DIR = ROOT_DIR / "route_service"
@@ -22,6 +23,7 @@ DOCKERFILE_PEDIDOS = PEDIDOS_DIR / "Dockerfile"
 DDL_PATH = DATABASE_DIR / "DDL.sql"
 SEED_PATH = DATABASE_DIR / "seed_db.py"
 SIMULADOR_PATH = DATABASE_DIR / "simulador_cadastro.py"
+OUTPUT_JSON_PATH = ROOT_DIR / "deploy_output.json"
 
 # configurações RDS
 DB_INSTANCE_TYPE = "db.t3.medium"
@@ -57,11 +59,14 @@ ALB_SCHEME = "internet-facing"
 ALB_TYPE = "application"
 ALB_IP_ADDRESS_TYPE = "ipv4" 
 
-# configurações auto scaling
+# =========================================================================
+# CONFIGURAÇÕES DE AUTO SCALING
+# =========================================================================
 AS_MIN_CAPACITY = 2
-AS_MAX_CAPACITY = 10
-AS_TARGET_VALUE = 70.0
-AS_SCALE_OUT_COOLDOWN = 60
+AS_MAX_CAPACITY = 10 
+AS_TARGET_VALUE_CPU = 20.0       # Threshold para serviços atrelados à CPU (Rotas/Pedidos)
+AS_TARGET_VALUE_REQ = 50      # Threshold agressivo para Cadastro: 50 requisições/minuto por Task
+AS_SCALE_OUT_COOLDOWN = 30       # Tempo rápido de reação para subir instâncias
 AS_SCALE_IN_COOLDOWN = 60
     
 # Nomes dos Target Groups
@@ -93,7 +98,6 @@ app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION
 
 
 def setup_security_group():
-    """Cria ou recupera o Security Group e garante que as portas necessárias estejam abertas"""
     print("Configurando Security Group.")
     vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
     vpc_id = vpcs['Vpcs'][0]['VpcId']
@@ -115,7 +119,6 @@ def setup_security_group():
         else:
             raise e
 
-    # Lista de portas que precisam estar abertas
     ports = [
         (DB_PORT, "PostgreSQL"),
         (API_PORT_CADASTRO, "API Cadastro"),
@@ -138,7 +141,7 @@ def setup_security_group():
             print(f"Porta {port} ({label}) autorizada.")
         except ClientError as e:
             if e.response['Error']['Code'] == 'InvalidPermission.Duplicate':
-                pass # Regra já existe, podemos ignorar
+                pass
             else:
                 print(f"Aviso ao autorizar porta {port}: {e}")
 
@@ -146,7 +149,6 @@ def setup_security_group():
 
 
 def get_or_create_rds_instance(sg_id):
-    """Provisiona o banco PostgreSQL, mas reutiliza se já existir"""
     print(f"Verificando instância RDS '{DB_IDENTIFIER}'.")
     try:
         response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
@@ -173,6 +175,7 @@ def get_or_create_rds_instance(sg_id):
                 BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
                 StorageType=DB_STORAGE_TYPE,
                 DBName=DB_NAME,
+                MultiAZ=True,
                 VpcSecurityGroupIds=[sg_id],
                 PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
             )
@@ -190,7 +193,6 @@ def get_or_create_rds_instance(sg_id):
 
 
 def run_ddl_only(endpoint):
-    """Executa a criação das estruturas (DDL) apenas se as tabelas não existirem"""
     try:
         conn = psycopg2.connect(
             host=endpoint, database=DB_NAME, user=DB_USER, password=DB_PASSWORD
@@ -198,7 +200,6 @@ def run_ddl_only(endpoint):
         conn.autocommit = True
         cursor = conn.cursor()
         
-        # Lê e executa o script do caminho correto
         with open(DDL_PATH, 'r', encoding='utf-8') as file:
             ddl_script = file.read()
 
@@ -211,8 +212,23 @@ def run_ddl_only(endpoint):
         print(f"Erro ao interagir com o banco: {e}")
 
 
+def get_dir_hash(directory_path):
+    """Gera um hash baseado no conteúdo da pasta para detectar alterações."""
+    sha_hash = hashlib.sha256()
+    for root, dirs, files in os.walk(directory_path):
+        # Ignora pastas irrelevantes para o código em si
+        dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', 'venv', '.venv', 'node_modules', '.aws']]
+        for names in sorted(files):
+            filepath = os.path.join(root, names)
+            try:
+                with open(filepath, 'rb') as f:
+                    sha_hash.update(f.read())
+            except Exception:
+                pass
+    return sha_hash.hexdigest()[:8]
+
+
 def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_client_param, sts_client_param, region):
-    """Cria o repositório ECR se não existir, constrói e envia a imagem"""
     account_id = sts_client_param.get_caller_identity()["Account"]
     ecr_uri = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
     
@@ -223,7 +239,26 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_cli
         if e.response['Error']['Code'] != 'RepositoryAlreadyExistsException':
             raise e
 
-    print(f"Autenticando Docker no ECR.")
+    # Lógica de Cache Inteligente (Hashing)
+    service_dir = dockerfile_path.parent
+    dir_hash = get_dir_hash(service_dir)
+    image_tag = f"hash-{dir_hash}"
+
+    try:
+        # Tenta achar a imagem com essa exata assinatura no ECR
+        ecr_client_param.describe_images(
+            repositoryName=repo_name,
+            imageIds=[{'imageTag': image_tag}]
+        )
+        print(f"[{repo_name}] Nenhuma alteração de código detectada. Pulando o Build e Push! (Reaproveitando imagem)")
+        return ecr_uri
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ImageNotFoundException':
+            pass # Se não achou, código mudou (ou é a primeira vez). Segue o jogo.
+        else:
+            raise e
+
+    print(f"[{repo_name}] Alterações detectadas. Iniciando Build e Push...")
     auth_token = ecr_client_param.get_authorization_token()
     token = auth_token['authorizationData'][0]['authorizationToken']
     username, password = base64.b64decode(token).decode('utf-8').split(':')
@@ -235,16 +270,19 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_cli
         check=True, stdout=subprocess.DEVNULL
     )
     
-    print(f"Build e Push ({repo_name}).")
     subprocess.run(["docker", "build", "-t", repo_name, "-f", str(dockerfile_path), str(context_dir)], check=True)
+    
+    # Taggea como latest (pro ECS rodar) e como hash (pro nosso script cachear depois)
     subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
+    subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:{image_tag}"], check=True)
+    
     subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
+    subprocess.run(["docker", "push", f"{ecr_uri}:{image_tag}"], check=True)
     
     return ecr_uri
 
 
 def setup_dynamodb():
-    """Configura a tabela do DynamoDB se não existir"""
     print(f"Configurando DynamoDB: {DYNAMODB_TABLE_NAME}")
     dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
     try:
@@ -291,9 +329,7 @@ def setup_dynamodb():
         else:
             raise e
 
-
-def setup_auto_scaling(service_name):
-    """Configura o Auto Scaling para um serviço ECS específico"""
+def setup_auto_scaling(service_name, policy_type='cpu', tg_arn=None, alb_arn=None):
     app_autoscaling.register_scalable_target(
         ServiceNamespace='ecs',
         ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
@@ -302,25 +338,45 @@ def setup_auto_scaling(service_name):
         MaxCapacity=AS_MAX_CAPACITY
     )
 
-    app_autoscaling.put_scaling_policy(
-        PolicyName=f'{service_name}-cpu-scaling',
-        ServiceNamespace='ecs',
-        ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-        ScalableDimension='ecs:service:DesiredCount',
-        PolicyType='TargetTrackingScaling',
-        TargetTrackingScalingPolicyConfiguration={
-            'TargetValue': AS_TARGET_VALUE,
-            'PredefinedMetricSpecification': {
-                'PredefinedMetricType': 'ECSServiceAverageCPUUtilization'
-            },
-            'ScaleOutCooldown': AS_SCALE_OUT_COOLDOWN,
-            'ScaleInCooldown': AS_SCALE_IN_COOLDOWN
-        }
-    )
+    if policy_type == 'cpu':
+        app_autoscaling.put_scaling_policy(
+            PolicyName=f'{service_name}-cpu-scaling',
+            ServiceNamespace='ecs',
+            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
+            ScalableDimension='ecs:service:DesiredCount',
+            PolicyType='TargetTrackingScaling',
+            TargetTrackingScalingPolicyConfiguration={
+                'TargetValue': AS_TARGET_VALUE_CPU,
+                'PredefinedMetricSpecification': {
+                    'PredefinedMetricType': 'ECSServiceAverageCPUUtilization'
+                },
+                'ScaleOutCooldown': AS_SCALE_OUT_COOLDOWN,
+                'ScaleInCooldown': AS_SCALE_IN_COOLDOWN
+            }
+        )
+    elif policy_type == 'alb_request':
+        alb_suffix = alb_arn.split('loadbalancer/')[-1]
+        tg_suffix = tg_arn.split(':', 5)[-1]
+        resource_label = f"{alb_suffix}/{tg_suffix}"
 
+        app_autoscaling.put_scaling_policy(
+            PolicyName=f'{service_name}-alb-req-scaling',
+            ServiceNamespace='ecs',
+            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
+            ScalableDimension='ecs:service:DesiredCount',
+            PolicyType='TargetTrackingScaling',
+            TargetTrackingScalingPolicyConfiguration={
+                'TargetValue': AS_TARGET_VALUE_REQ,
+                'PredefinedMetricSpecification': {
+                    'PredefinedMetricType': 'ALBRequestCountPerTarget',
+                    'ResourceLabel': resource_label
+                },
+                'ScaleOutCooldown': AS_SCALE_OUT_COOLDOWN,
+                'ScaleInCooldown': AS_SCALE_IN_COOLDOWN
+            }
+        )
 
 def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpoint, sg_id):
-    """Cria ALB, Target Groups, ECS Cluster e Services unificados"""
     account_id = sts_client.get_caller_identity()["Account"]
     role_arn = f"arn:aws:iam::{account_id}:role/LabRole" 
     
@@ -335,7 +391,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
         family=TASK_CADASTRO_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu=TASK_CPU, memory=TASK_MEMORY,
+        cpu="256", memory="512",
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "cadastro-container",
@@ -512,12 +568,9 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
     
     print("Iniciando/Atualizando ECS Services.")
 
-    def create_or_update_service(service_name, task_family, tg_arn, container_name, container_port):
+    def create_or_update_service(service_name, task_family, tg_arn, container_name, container_port, policy_type='cpu'):
         try:
-            # 1. Tenta descrever o serviço primeiro para verificar existência
             response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
-            
-            # Se o serviço existe (e não está sendo deletado)
             if response['services'] and response['services'][0]['status'] != 'INACTIVE':
                 print(f"Serviço '{service_name}' já existe. Atualizando.")
                 ecs_client.update_service(
@@ -527,7 +580,6 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
                     forceNewDeployment=True
                 )
             else:
-                # 2. Se não existe, cria
                 print(f"Criando novo serviço '{service_name}'.")
                 ecs_client.create_service(
                     cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
@@ -535,100 +587,48 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
                     networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
                     loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
                 )
-                setup_auto_scaling(service_name)
+                
+            setup_auto_scaling(service_name, policy_type=policy_type, tg_arn=tg_arn, alb_arn=alb_arn)
 
         except ClientError as e:
-            # Fallback para o caso de erro de race condition ou similar
             if e.response['Error']['Code'] == 'InvalidParameterException' and 'already exists' in e.response['Error']['Message']:
                 print(f"Aviso: Serviço '{service_name}' detectado via erro de redundância. Forçando update.")
                 ecs_client.update_service(
                     cluster=CLUSTER_NAME, service=service_name, 
                     taskDefinition=task_family, forceNewDeployment=True
                 )
+                setup_auto_scaling(service_name, policy_type=policy_type, tg_arn=tg_arn, alb_arn=alb_arn)
             else:
                 raise e
 
-    create_or_update_service("dijkfood-cadastro-service", TASK_CADASTRO_FAMILY, tg_cad_arn, "cadastro-container", API_PORT_CADASTRO)
-    create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS)
-    create_or_update_service("dijkfood-pedidos-service", TASK_PEDIDOS_FAMILY, tg_ped_arn, "pedidos-container", API_PORT_PEDIDOS)
+    create_or_update_service("dijkfood-cadastro-service", TASK_CADASTRO_FAMILY, tg_cad_arn, "cadastro-container", API_PORT_CADASTRO, policy_type='alb_request')
+    create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS, policy_type='cpu')
+    create_or_update_service("dijkfood-pedidos-service", TASK_PEDIDOS_FAMILY, tg_ped_arn, "pedidos-container", API_PORT_PEDIDOS, policy_type='cpu')
     
     print("Aguardando Serviços ficarem online.")
     waiter = ecs_client.get_waiter('services_stable')
     waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"])
     
     print(f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos")
-    return alb_dns
 
-
-def destroy_infrastructure():
-    """Destrói os recursos ECS, ALB, ECR. Mantém o Banco de Dados e o SG intactos."""
-    print("Iniciando a destruição dos recursos AWS (Mantendo Banco de Dados vivo).")
+    # Salva os endpoints para o Seed e para a UI
+    endpoints = {
+        "cadastro": f"http://{alb_dns}",
+        "rotas": f"http://{alb_dns}",
+        "pedidos": f"http://{alb_dns}"
+    }
     
-    # 1. Destruir ECS Services e Cluster
-    services = ["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"]
-    for svc in services:
-        try:
-            ecs_client.update_service(cluster=CLUSTER_NAME, service=svc, desiredCount=0)
-        except Exception:
-            pass
-
-    try:
-        actual_services = []
-        for svc in services:
-            try:
-                res = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[svc])
-                if res['services'] and res['services'][0]['status'] not in ['INACTIVE', 'DRAINING']:
-                    actual_services.append(svc)
-            except Exception:
-                pass
-
-        if actual_services:
-            print(f"Aguardando interrupção dos serviços: {actual_services}")
-            # Aguarda até que runningCount seja 0 ou max_attempts
-            for _ in range(30):
-                res = ecs_client.describe_services(cluster=CLUSTER_NAME, services=actual_services)
-                if all(s['runningCount'] == 0 for s in res['services']):
-                    break
-                time.sleep(10)
-
-            for svc in actual_services:
-                ecs_client.delete_service(cluster=CLUSTER_NAME, service=svc)
-        
-        ecs_client.delete_cluster(cluster=CLUSTER_NAME)
-        print("Cluster e Serviços ECS apagados.")
-    except Exception as e:
-        print(f"Aviso ao deletar ECS: {e}")
-
-    # 2. Destruir ALB
-    try:
-        albs = elbv2_client.describe_load_balancers(Names=[ALB_NAME])
-        for alb in albs['LoadBalancers']:
-            arn = alb['LoadBalancerArn']
-            elbv2_client.delete_load_balancer(LoadBalancerArn=arn)
-            waiter = elbv2_client.get_waiter('load_balancers_deleted')
-            waiter.wait(LoadBalancerArns=[arn])
-            print("Load Balancer apagado.")
-    except Exception as e:
-        pass
-
-    # 3. Destruir Target Groups
-    try:
-        tgs = elbv2_client.describe_target_groups(Names=[TG_CADASTRO_NAME, TG_ROTAS_NAME, TG_PEDIDOS_NAME])
-        for tg in tgs['TargetGroups']:
-            elbv2_client.delete_target_group(TargetGroupArn=tg['TargetGroupArn'])
-        print("Target Groups apagados.")
-    except Exception:
-        pass
-
-    # 4. Destruir ECRs
-    for repo in [REPO_CADASTRO, REPO_ROTAS, REPO_PEDIDOS]:
-        try:
-            ecr_client.delete_repository(repositoryName=repo, force=True)
-            print(f"ECR {repo} apagado.")
-        except Exception:
-            pass
-        
-    print("Destruição dos serviços conectores finalizada! O Banco RDS e o Security Group foram MANTIDOS.")
+    with open(ROOT_DIR / "alb_endpoints.json", "w") as f:
+        json.dump(endpoints, f, indent=2)
+    
+    # Também copia para a pasta public do Vite para que a UI carregue via fetch
+    public_dir = ROOT_DIR / "demo-ui" / "public"
+    if public_dir.exists():
+        with open(public_dir / "alb_endpoints.json", "w") as f:
+            json.dump(endpoints, f, indent=2)
+            
+    print(f"Arquivo alb_endpoints.json atualizado na raiz e em demo-ui/public/")
+    return alb_dns
 
 
 def main():
@@ -646,7 +646,6 @@ def main():
 
         setup_dynamodb()
         
-        # Faz o build buscando as pastas filhas
         ecr_uri_cadastro = build_and_push_docker_image(REPO_CADASTRO, DOCKERFILE_CADASTRO, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
         ecr_uri_rotas = build_and_push_docker_image(REPO_ROTAS, DOCKERFILE_ROTAS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
         ecr_uri_pedidos = build_and_push_docker_image(REPO_PEDIDOS, DOCKERFILE_PEDIDOS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
@@ -658,7 +657,17 @@ def main():
         print("=" * 60)
         print(f"API Cadastro Health: http://{alb_dns}/cadastro/health")
         print(f"API Rotas Health:    http://{alb_dns}/rotas/health")
-        print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health")
+        print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health") 
+        print("=" * 60)
+        
+        deploy_data = {
+            "API_URL": f"http://{alb_dns}"
+        }
+        
+        with open(OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
+            json.dump(deploy_data, f, indent=4)
+            
+        print(f"\nInformações de conexão salvas em: {OUTPUT_JSON_PATH.name}")
         print("=" * 60)
 
     except Exception as e:
@@ -671,4 +680,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # destroy_infrastructure()
