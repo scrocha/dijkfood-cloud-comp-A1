@@ -396,7 +396,63 @@ async def run_flow_test(cfg: dict):
 def run_flow_from_json(json_path: str):
     """Entry point: lê config JSON e roda o teste de fluxo."""
     import json
+    from json import JSONDecodeError
     reload_env_and_urls()
-    with open(json_path) as f:
-        cfg = json.load(f)
+
+    def _strip_jsonc_comments(s: str) -> str:
+        """Remove comentários // e /* */ preservando strings JSON."""
+        out: list[str] = []
+        i = 0
+        n = len(s)
+        in_string = False
+        escape = False
+        while i < n:
+            ch = s[i]
+
+            if in_string:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                i += 1
+                continue
+
+            # fora de string
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+                i += 1
+                continue
+
+            # // comentário até fim da linha
+            if ch == "/" and i + 1 < n and s[i + 1] == "/":
+                i += 2
+                while i < n and s[i] not in "\r\n":
+                    i += 1
+                continue
+
+            # /* comentário em bloco */
+            if ch == "/" and i + 1 < n and s[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (s[i] == "*" and s[i + 1] == "/"):
+                    i += 1
+                i += 2 if i + 1 < n else 0
+                continue
+
+            out.append(ch)
+            i += 1
+
+        return "".join(out)
+
+    with open(json_path, encoding="utf-8") as f:
+        raw = f.read()
+    try:
+        cfg = json.loads(_strip_jsonc_comments(raw))
+    except JSONDecodeError as e:
+        raise SystemExit(
+            f"[fluxo] erro ao ler JSON em {json_path}: {e.msg} (linha {e.lineno}, coluna {e.colno})"
+        ) from e
     asyncio.run(run_flow_test(cfg))

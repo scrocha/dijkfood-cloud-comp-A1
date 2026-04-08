@@ -212,7 +212,6 @@ cache/
 *.graphml
 *.pkl
 
-artifacts/carga
-
 alb_endpoints.json
 
+artifacts/carga*
