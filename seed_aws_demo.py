@@ -11,11 +11,34 @@ import json
 import os
 import urllib.request
 import urllib.error
+from pathlib import Path
 
-ALB_URL = os.getenv(
-    "ALB_URL",
-    "http://dijkfood-alb-536088188.us-east-1.elb.amazonaws.com",
-).rstrip("/")
+def get_alb_url():
+    """Tenta obter a URL do ALB do JSON gerado, ou do env, ou fallback fixo."""
+    # 1. Tenta alb_endpoints.json na raiz do projeto (onde o deploy.py o salva)
+    # Procuramos no CWD ou um nível acima
+    root_json = Path("alb_endpoints.json")
+    if not root_json.exists():
+        root_json = Path(__file__).parent / "alb_endpoints.json"
+
+    if root_json.exists():
+        try:
+            data = json.loads(root_json.read_text())
+            # O sistema usa ALB único, então cadastramos a base do ALB
+            url = data.get("cadastro") or data.get("rotas") or data.get("pedidos")
+            if url:
+                print(f"URL do ALB carregada de {root_json}: {url}")
+                return url.rstrip("/")
+        except Exception as e:
+            print(f"Erro ao ler {root_json}: {e}")
+
+    # 2. Fallback para variável de ambiente ou padrão
+    return os.getenv(
+        "ALB_URL",
+        "http://dijkfood-alb-536088188.us-east-1.elb.amazonaws.com",
+    ).rstrip("/")
+
+ALB_URL = get_alb_url()
 
 
 # ---------------------------------------------------------------------------

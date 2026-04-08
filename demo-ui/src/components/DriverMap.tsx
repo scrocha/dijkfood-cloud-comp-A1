@@ -1,24 +1,35 @@
-import { useEffect } from "react";
-import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
+import { useEffect } from "react";
+import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
 
-function pinSvg(color: string) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36"><path d="M14 0C6.3 0 0 6.3 0 14c0 9.6 14 22 14 22S28 23.6 28 14C28 6.3 21.7 0 14 0z" fill="${color}" stroke="#fff" stroke-width="1.5"/><circle cx="14" cy="14" r="6" fill="#fff"/></svg>`;
-}
-
-function makePin(color: string) {
+function makeIcon(emoji: string, color: string) {
   return new L.DivIcon({
-    html: pinSvg(color),
+    html: `
+      <div style="
+        background-color: ${color};
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        border: 2px solid white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      ">
+        ${emoji}
+      </div>
+    `,
     className: "",
-    iconSize: [28, 36],
-    iconAnchor: [14, 36],
-    popupAnchor: [0, -38],
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
+    popupAnchor: [0, -18],
   });
 }
 
-const ICON_DRIVER     = makePin("#c45c26"); // laranja — entregador
-const ICON_RESTAURANT = makePin("#2563eb"); // azul   — restaurante (origem)
-const ICON_CUSTOMER   = makePin("#16a34a"); // verde  — destino (cliente)
+const ICON_DRIVER = makeIcon("🛵", "#f97316"); // laranja
+const ICON_RESTAURANT = makeIcon("🍕", "#3b82f6"); // azul
+const ICON_CUSTOMER = makeIcon("🏠", "#22c55e"); // verde
 
 type LatLng = { lat: number; lng: number };
 
@@ -36,13 +47,14 @@ type Props = {
   customer?: LatLng | null;
   driverName?: string;
   restaurantName?: string;
+  routePoints?: LatLng[];
 };
 
-export function DriverMap({ driver, restaurant, customer, driverName, restaurantName }: Props) {
+export function DriverMap({ driver, restaurant, customer, driverName, restaurantName, routePoints }: Props) {
   const center: LatLng = driver ?? restaurant ?? customer ?? { lat: -23.5505, lng: -46.6333 };
 
   return (
-    <div style={{ height: 320, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+    <div style={{ height: 400, borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)", marginTop: "1rem" }}>
       <MapContainer
         center={[center.lat, center.lng]}
         zoom={14}
@@ -54,11 +66,21 @@ export function DriverMap({ driver, restaurant, customer, driverName, restaurant
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
+        {routePoints && routePoints.length > 0 && (
+          <Polyline
+            positions={routePoints.map(p => [p.lat, p.lng])}
+            color="#3b82f6"
+            weight={5}
+            opacity={0.6}
+            dashArray="10, 10"
+          />
+        )}
+
         {driver && (
           <>
             <Recenter center={driver} />
             <Marker position={[driver.lat, driver.lng]} icon={ICON_DRIVER}>
-              <Popup>{driverName ?? "Entregador"} 🛵</Popup>
+              <Popup>{driverName ?? "Entregador"}</Popup>
             </Marker>
           </>
         )}
@@ -71,7 +93,7 @@ export function DriverMap({ driver, restaurant, customer, driverName, restaurant
 
         {customer && (
           <Marker position={[customer.lat, customer.lng]} icon={ICON_CUSTOMER}>
-            <Popup>Destino</Popup>
+            <Popup>Destino (Cliente)</Popup>
           </Marker>
         )}
       </MapContainer>

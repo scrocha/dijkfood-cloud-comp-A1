@@ -3,7 +3,7 @@ from botocore.exceptions import ClientError
 import time
 import psycopg2
 import subprocess
-import os
+import json
 import base64
 from pathlib import Path
 
@@ -557,6 +557,24 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
     waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"])
     
     print(f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos")
+
+    # Salva os endpoints para o Seed e para a UI
+    endpoints = {
+        "cadastro": f"http://{alb_dns}",
+        "rotas": f"http://{alb_dns}",
+        "pedidos": f"http://{alb_dns}"
+    }
+    
+    with open(ROOT_DIR / "alb_endpoints.json", "w") as f:
+        json.dump(endpoints, f, indent=2)
+    
+    # Também copia para a pasta public do Vite para que a UI carregue via fetch
+    public_dir = ROOT_DIR / "demo-ui" / "public"
+    if public_dir.exists():
+        with open(public_dir / "alb_endpoints.json", "w") as f:
+            json.dump(endpoints, f, indent=2)
+            
+    print(f"Arquivo alb_endpoints.json atualizado na raiz e em demo-ui/public/")
     return alb_dns
 
 
