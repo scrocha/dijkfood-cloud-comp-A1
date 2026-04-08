@@ -5,16 +5,33 @@ import random
 import uuid
 from faker import Faker
 import os
+import json
+from pathlib import Path
 
 # Ajuste as taxas aqui para bater o número que desejar por segundo.
-# Atualmente somando tudo (50+50+50+(50*3)) = 300 requisições HTTP por segundo!
-USUARIOS_POR_SEGUNDO = 50
-ENTREGADORES_POR_SEGUNDO = 50
-RESTAURANTES_POR_SEGUNDO = 50
-PRODUTOS_POR_RESTAURANTE = 3
+# Atualmente somando tudo (2+2+2+(2*3)) = 12 requisições HTTP por segundo!
+USUARIOS_POR_SEGUNDO = 2
+ENTREGADORES_POR_SEGUNDO = 2
+RESTAURANTES_POR_SEGUNDO = 2
+PRODUTOS_POR_RESTAURANTE = 3 
 
 fake = Faker('pt_BR')
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
+
+if json_path.exists():
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            API_URL = config.get("API_URL")
+            print(f"API_URL carregada do JSON: {API_URL}")
+
+    except Exception as e:
+        print(f"Erro ao ler JSON, usando fallback: {e}")
+        API_URL = os.getenv("API_URL", "http://localhost:8000")
+else:
+
+    API_URL = os.getenv("API_URL", "http://localhost:8000")
+    print(f"JSON não encontrado, usando API_URL: {API_URL}")
 
 TIPOS_COZINHA = ["Italiana", "Japonesa", "Brasileira", "Hamburgueria", "Mexicana"]
 TIPOS_VEICULO = ["Moto", "Bicicleta", "Carro"]

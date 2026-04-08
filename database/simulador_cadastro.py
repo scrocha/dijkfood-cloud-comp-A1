@@ -5,6 +5,8 @@ import random
 import uuid
 from faker import Faker
 import os
+import json
+from pathlib import Path
 
 RESTAURANTES_POR_SEGUNDO = 35
 PRODUTOS_POR_RESTAURANTE = 3
@@ -12,7 +14,22 @@ ENTREGADORES_POR_SEGUNDO = 35
 USUARIOS_POR_SEGUNDO = 35
 
 fake = Faker('pt_BR')
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
+
+if json_path.exists():
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            API_URL = config.get("API_URL")
+            print(f"API_URL carregada do JSON: {API_URL}")
+
+    except Exception as e:
+        print(f"Erro ao ler JSON, usando fallback: {e}")
+        API_URL = os.getenv("API_URL", "http://localhost:8000")
+else:
+
+    API_URL = os.getenv("API_URL", "http://localhost:8000")
+    print(f"JSON não encontrado, usando API_URL: {API_URL}")
 
 TIPOS_COZINHA = ["Italiana", "Japonesa", "Brasileira", "Hamburgueria", "Mexicana"]
 TIPOS_VEICULO = ["Moto", "Bicicleta", "Carro"]
