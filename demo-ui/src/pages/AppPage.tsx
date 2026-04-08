@@ -9,6 +9,7 @@ import { useRestaurants } from "../hooks/useRestaurants";
 import { useRunOrderDemo } from "../hooks/useRunOrderDemo";
 import { readSession, clearSession, type DemoSession } from "../session/demoSession";
 import type { OrderStatus } from "../api/pedidos";
+import { DriverMap } from "../components/DriverMap";
 
 /** Só faz sentido mostrar/poller GPS depois disto — antes ainda é cozinha. */
 const DRIVER_TRACKING_STATUSES: OrderStatus[] = [
@@ -18,10 +19,6 @@ const DRIVER_TRACKING_STATUSES: OrderStatus[] = [
   "DELIVERED",
 ];
 
-function formatLoc(loc: { lat: string; lng: string } | null): string {
-  if (!loc) return "—";
-  return `lat ${loc.lat}, lng ${loc.lng}`;
-}
 
 export function AppPage() {
   /** Sincronizar com sessionStorage na 1ª renderização; useEffect chega tarde demais para Navigate. */
@@ -180,7 +177,13 @@ export function AppPage() {
               ? `(id na API) ${effectiveEntregadorId}`
               : "—"}
         </p>
-        <p className="mono">{formatLoc(driverLoc)}</p>
+        <DriverMap
+          driver={driverLoc ? { lat: Number(driverLoc.lat), lng: Number(driverLoc.lng) } : null}
+          restaurant={restaurant ? { lat: restaurant.endereco_latitude, lng: restaurant.endereco_longitude } : null}
+          customer={{ lat: sess.lat, lng: sess.lng }}
+          driverName={entregadorDaVista?.nome}
+          restaurantName={restaurant?.nome}
+        />
       </div>
 
       <p className="muted">
