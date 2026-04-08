@@ -1,11 +1,18 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from .models import OrderCreate, OrderStatus, OrderStatusUpdate, DriverLocationUpdate
 from .repository import OrderRepository, LocationRepository
 from typing import List, Optional
 
 app = FastAPI(
     title="Dijkfood Order Service (DynamoDB)"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 order_repo = OrderRepository()
 loc_repo = LocationRepository()

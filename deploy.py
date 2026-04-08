@@ -59,7 +59,7 @@ ALB_IP_ADDRESS_TYPE = "ipv4"
 # =========================================================================
 # CONFIGURAÇÕES DE AUTO SCALING
 # =========================================================================
-AS_MIN_CAPACITY = 1
+AS_MIN_CAPACITY = 2
 AS_MAX_CAPACITY = 10 
 AS_TARGET_VALUE_CPU = 20.0       # Threshold para serviços atrelados à CPU (Rotas/Pedidos)
 AS_TARGET_VALUE_REQ = 50      # Threshold agressivo para Cadastro: 500 requisições/minuto por Task
@@ -546,7 +546,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
                 print(f"Criando novo serviço '{service_name}'.")
                 ecs_client.create_service(
                     cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
-                    desiredCount=1, launchType="FARGATE",
+                    desiredCount=3, launchType="FARGATE",
                     networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
                     loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
                 )

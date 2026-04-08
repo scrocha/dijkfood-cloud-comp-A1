@@ -10,11 +10,13 @@ from pathlib import Path
 import rustworkx as rx 
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, Tuple, List, Optional
 
 from route_service.models import (
     EntregadorRequest, Ponto, RotaRequest, 
-    EntregadorResponse, RotaEntregaResponse
+    EntregadorResponse, RotaEntregaResponse,
+    RotaResponseData, Percurso
 )
 
 _DIR = Path(__file__).parent
@@ -63,6 +65,12 @@ app = FastAPI(
     redoc_url="/rotas/redoc",
     openapi_url="/rotas/openapi.json"
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Funções de Roteamento e Busca ---
 
@@ -79,7 +87,7 @@ def projetar_ponto(ponto: Ponto) -> Tuple[int, Ponto]:
     lon_proj = GLOBAL_NODE_COORDS[node_id, 1]
     return node_id, Ponto(lat=float(lat_proj), lon=float(lon_proj))
 
-def encontrar_top_n_entregadores(restaurante: Ponto, entregadores: list[Ponto], n: int = 5) -> list[int]:
+def encontrar_top_n_entregadores(restaurante: Ponto, entregadores: List[Ponto], n: int = 5) -> List[int]:
     coords_entregadores = np.array([(e.lat, e.lon) for e in entregadores], dtype=np.float32)
     lat_rest, lon_rest = restaurante.lat, restaurante.lon
     
@@ -125,22 +133,22 @@ def calcular_distancia_haversine(ponto1: Ponto, ponto2: Ponto) -> float:
     y = lat2 - lat1
     return 6371000.0 * math.hypot(x, y)
 
-def extrair_segmentos_do_caminho(G: rx.PyGraph, caminho_rx: list, node_coords: np.ndarray) -> Tuple[List[Dict], float]:
-    segmentos = []
+def extrair_segmentos_do_caminho(G: rx.PyGraph, caminho_rx: List[int], node_coords: np.ndarray) -> Tuple[List[Percurso], float]:
+    segmentos: List[Percurso] = []
     comprimento_total = 0.0
     
     for u_idx, v_idx in zip(caminho_rx[:-1], caminho_rx[1:]):
         comprimento = G.get_edge_data(u_idx, v_idx)
         comprimento_total += comprimento
         
-        segmentos.append({
-            "ponto_origem": {"lat": float(node_coords[u_idx, 0]), "lon": float(node_coords[u_idx, 1])},
-            "ponto_fim": {"lat": float(node_coords[v_idx, 0]), "lon": float(node_coords[v_idx, 1])},
-            "comprimento": comprimento
-        })
+        segmentos.append(Percurso(
+            ponto_origem=Ponto(lat=float(node_coords[u_idx, 0]), lon=float(node_coords[u_idx, 1])),
+            ponto_fim=Ponto(lat=float(node_coords[v_idx, 0]), lon=float(node_coords[v_idx, 1])),
+            comprimento=comprimento
+        ))
     return segmentos, comprimento_total
 
-def resolver_astar(no_origem: int, no_destino: int):
+def resolver_astar(no_origem: int, no_destino: int) -> Optional[List[int]]:
     heuristica = criar_heuristica_otimizada(no_destino)
     
     def goal_fn(n):
@@ -162,27 +170,27 @@ def resolver_astar(no_origem: int, no_destino: int):
         return None
 
 
-async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[str, Any]]:
+async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[RotaResponseData]:
     no_origem, ponto_origem_proj = await asyncio.to_thread(projetar_ponto, origem)
     no_destino, ponto_destino_proj = await asyncio.to_thread(projetar_ponto, destino)
 
-    percurso_inicial = {
-        "ponto_origem": {"lat": origem.lat, "lon": origem.lon},
-        "ponto_fim": {"lat": ponto_origem_proj.lat, "lon": ponto_origem_proj.lon},
-        "comprimento": round(calcular_distancia_haversine(origem, ponto_origem_proj), 2)
-    }
-    percurso_final = {
-        "ponto_origem": {"lat": ponto_destino_proj.lat, "lon": ponto_destino_proj.lon},
-        "ponto_fim": {"lat": destino.lat, "lon": destino.lon},
-        "comprimento": round(calcular_distancia_haversine(ponto_destino_proj, destino), 2)
-    }
+    percurso_inicial = Percurso(
+        ponto_origem=origem,
+        ponto_fim=ponto_origem_proj,
+        comprimento=round(calcular_distancia_haversine(origem, ponto_origem_proj), 2)
+    )
+    percurso_final = Percurso(
+        ponto_origem=ponto_destino_proj,
+        ponto_fim=destino,
+        comprimento=round(calcular_distancia_haversine(ponto_destino_proj, destino), 2)
+    )
 
     if no_origem == no_destino:
-        return {
-            "distancia_metros": 0.0, "nos": 1,
-            "percursos": [percurso_inicial, percurso_final],
-            "origem_projetada": ponto_origem_proj, "destino_projetado": ponto_destino_proj
-        }
+        return RotaResponseData(
+            distancia_metros=0.0, nos=1,
+            percursos=[percurso_inicial, percurso_final],
+            origem_projetada=ponto_origem_proj, destino_projetado=ponto_destino_proj
+        )
 
     caminho_rx = await asyncio.to_thread(resolver_astar, no_origem, no_destino)
     
@@ -193,13 +201,13 @@ async def calcular_rota_async(origem: Ponto, destino: Ponto) -> Optional[Dict[st
         extrair_segmentos_do_caminho, GLOBAL_GRAPH, caminho_rx, GLOBAL_NODE_COORDS
     )
 
-    return {
-        "distancia_metros": round(comprimento, 2),
-        "nos": len(caminho_rx),
-        "percursos": [percurso_inicial] + segmentos + [percurso_final],
-        "origem_projetada": ponto_origem_proj,
-        "destino_projetado": ponto_destino_proj
-    }
+    return RotaResponseData(
+        distancia_metros=round(comprimento, 2),
+        nos=len(caminho_rx),
+        percursos=[percurso_inicial] + segmentos + [percurso_final],
+        origem_projetada=ponto_origem_proj,
+        destino_projetado=ponto_destino_proj
+    )
 
 @app.post("/rotas/entregador-mais-proximo", response_model=EntregadorResponse)
 async def entregador_mais_proximo(req: EntregadorRequest):
@@ -213,24 +221,24 @@ async def entregador_mais_proximo(req: EntregadorRequest):
     ]
     resultados_rotas = await asyncio.gather(*tarefas_rotas)
     
-    melhor_rota = None
-    melhor_idx = -1
-    menor_distancia = float('inf')
+    melhor_rota: Optional[RotaResponseData] = None
+    melhor_idx: int = -1
+    menor_distancia: float = float('inf')
     
     for idx, rota in zip(top_n_indices, resultados_rotas):
-        if rota and rota["distancia_metros"] < menor_distancia:
-            menor_distancia = rota["distancia_metros"]
+        if rota and rota.distancia_metros < menor_distancia:
+            menor_distancia = rota.distancia_metros
             melhor_rota = rota
             melhor_idx = idx
 
     if not melhor_rota:
         raise HTTPException(status_code=404, detail="Não foi possível rotear nenhum dos entregadores próximos.")
 
-    return {
-        "entregador_idx": melhor_idx,
-        "entregador_original": req.entregadores[melhor_idx],
-        "rota_ao_restaurante": melhor_rota
-    }
+    return EntregadorResponse(
+        entregador_idx=melhor_idx,
+        entregador_original=req.entregadores[melhor_idx],
+        rota_ao_restaurante=melhor_rota
+    )
 
 @app.post("/rotas/rota-entrega", response_model=RotaEntregaResponse)
 async def rota_entrega(req: RotaRequest):
@@ -239,11 +247,11 @@ async def rota_entrega(req: RotaRequest):
     if not rota:
          raise HTTPException(status_code=404, detail="Não existe rota viária possível.")
          
-    return {
-        "restaurante_solicitado": req.origem,
-        "cliente_solicitado": req.destino,
-        "dados_rota": rota
-    }
+    return RotaEntregaResponse(
+        restaurante_solicitado=req.origem,
+        cliente_solicitado=req.destino,
+        dados_rota=rota
+    )
 
 @app.get("/rotas/health")
 def health():
