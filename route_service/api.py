@@ -10,6 +10,7 @@ from pathlib import Path
 import rustworkx as rx 
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, Tuple, List, Optional
 
 from route_service.models import (
@@ -63,6 +64,12 @@ app = FastAPI(
     docs_url="/rotas/docs",
     redoc_url="/rotas/redoc",
     openapi_url="/rotas/openapi.json"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --- Funções de Roteamento e Busca ---
