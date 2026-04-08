@@ -170,6 +170,7 @@ export function AppPage() {
       restaurant: { lat: restaurant.endereco_latitude, lon: restaurant.endereco_longitude },
       customer: { lat: sess.lat, lon: sess.lng },
       entregadorId: entregador.entregador_id,
+      entregadorPos: { lat: entregador.endereco_latitude, lon: entregador.endereco_longitude },
       onOrderCreated: (id) => setOrderId(id),
     });
   }
