@@ -97,7 +97,7 @@ async def run_single_scenario(cfg: dict, run_dir: Path):
         )
 
 
-def run_from_json(json_path: str):
+def run_from_json(json_path: str, destroy_after: bool = False):
     """Ponto de entrada principal: lê JSON e orquestra."""
     with open(json_path) as f:
         configs = json.load(f)
@@ -134,6 +134,12 @@ def run_from_json(json_path: str):
         for p in procs:
             p.wait()
         print("fim (todos processos)")
+
+    if destroy_after:
+        root = Path(__file__).resolve().parent.parent
+        destroy_py = root / "destroy.py"
+        print(f"Executando destroy após carga: {destroy_py} --soft")
+        subprocess.run([sys.executable, str(destroy_py), "--soft"], cwd=str(root))
 
 
 def run_internal_single(cfg_json: str, run_dir_str: str):
