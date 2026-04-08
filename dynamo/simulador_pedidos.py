@@ -6,7 +6,7 @@ import uuid
 import os
 import boto3
 from collections import deque
-
+import json
 # =========================================================================
 # CONFIGURAÇÕES
 # =========================================================================
@@ -14,7 +14,7 @@ PEDIDOS_POR_SEGUNDO = 15
 LOCALIZACOES_POR_SEGUNDO = 40
 CONSULTAS_POR_SEGUNDO = 25
 
-API_URL = os.getenv("API_URL", "http://dijkfood-alb-536088188.us-east-1.elb.amazonaws.com")
+API_URL = os.getenv("API_URL", "http://dijkfood-alb-1175042617.us-east-1.elb.amazonaws.com")
 CLUSTER_NAME = "dijkfood-cluster"
 SERVICE_NAME = "dijkfood-pedidos-service"
 AWS_REGION = "us-east-1"
@@ -237,7 +237,7 @@ async def main():
     print("=" * 62)
     print(f" API:    {API_URL}")
     print(f" Carga:  {PEDIDOS_POR_SEGUNDO} pedidos/s | {LOCALIZACOES_POR_SEGUNDO} locs/s | {CONSULTAS_POR_SEGUNDO} consultas/s")
-    print(f" Janela: métricas calculadas nos últimos {JANELA_SEGUNDOS}s (não acumulado)")
+    print(f" Janela: métricas calculadas nos últimos {JANELA_SEGUNDOS}s ")
     print("=" * 62)
 
     async with httpx.AsyncClient(

@@ -27,14 +27,14 @@ def kill_random_task(task_arns):
     ecs.stop_task(cluster=CLUSTER_NAME, task=target, reason="Teste de tolerância a falhas (Chaos Test)")
     return target
 
-def monitor_recovery(old_task_arn):
-    print("Aguardando o ECS detectar a falha e subir uma nova instância...")
+def monitor_recovery(old_task_arn, target_count):
+    print(f"Aguardando o ECS detectar a falha e retornar para {target_count} instâncias...")
     start_time = time.time()
     
     while True:
         tasks = get_running_tasks()
-        # Se a antiga sumiu e temos uma nova (ou a mesma quantidade de antes)
-        if old_task_arn not in tasks and len(tasks) >= 1:
+        # Se a antiga sumiu e voltamos ao número original de instâncias
+        if old_task_arn not in tasks and len(tasks) >= target_count:
             print(f"\n[SUCESSO] O sistema se recuperou!")
             print(f"Nova(s) tarefa(s) detectada(s): {[t.split('/')[-1] for t in tasks]}")
             break
@@ -55,8 +55,9 @@ if __name__ == "__main__":
         print("Erro: Nenhuma tarefa encontrada no cluster. Certifique-se de que o serviço está rodando.")
         sys.exit(1)
     
-    print(f"Tarefas atuais: {len(tasks)}")
+    initial_count = len(tasks)
+    print(f"Tarefas atuais: {initial_count}")
     
     old_task = kill_random_task(tasks)
     if old_task:
-        monitor_recovery(old_task)
+        monitor_recovery(old_task, initial_count)

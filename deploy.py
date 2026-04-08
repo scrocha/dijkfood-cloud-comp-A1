@@ -8,6 +8,7 @@ import base64
 import json
 import hashlib
 from pathlib import Path
+import os
 
 # =========================================================================
 # CONFIGURAÇÃO DE CAMINHOS (BLINDADA)
