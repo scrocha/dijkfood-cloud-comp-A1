@@ -14,7 +14,7 @@ PEDIDOS_POR_SEGUNDO = 15
 LOCALIZACOES_POR_SEGUNDO = 40
 CONSULTAS_POR_SEGUNDO = 25
 
-API_URL = os.getenv("API_URL", "http://dijkfood-alb-169995667.us-east-1.elb.amazonaws.com")
+API_URL = os.getenv("API_URL", "http://dijkfood-alb-536088188.us-east-1.elb.amazonaws.com")
 CLUSTER_NAME = "dijkfood-cluster"
 SERVICE_NAME = "dijkfood-pedidos-service"
 AWS_REGION = "us-east-1"

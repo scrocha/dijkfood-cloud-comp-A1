@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 
 from .metrics import WindowAccumulator, ensure_run_dir, write_summary_row, write_window_row
-from .payloads import Fixture
+from .payloads import Fixture, reload_env_and_urls, target_environment_line, urls_source_line
 from .scenarios import SCENARIOS
 
 
@@ -99,6 +99,7 @@ async def run_single_scenario(cfg: dict, run_dir: Path):
 
 def run_from_json(json_path: str, destroy_after: bool = False):
     """Ponto de entrada principal: lê JSON e orquestra."""
+    reload_env_and_urls()
     with open(json_path) as f:
         configs = json.load(f)
 
@@ -113,6 +114,10 @@ def run_from_json(json_path: str, destroy_after: bool = False):
             sys.exit(1)
 
     run_dir = ensure_run_dir(Path("artifacts") / "carga")
+    src = urls_source_line()
+    if src:
+        print(src)
+    print(target_environment_line())
     print(f"saida {run_dir.resolve()}")
 
     if len(configs) == 1:
@@ -144,6 +149,7 @@ def run_from_json(json_path: str, destroy_after: bool = False):
 
 def run_internal_single(cfg_json: str, run_dir_str: str):
     """Chamado internamente por subprocess para rodar 1 cenário isolado."""
+    reload_env_and_urls()
     cfg = json.loads(cfg_json)
     run_dir = Path(run_dir_str)
     asyncio.run(run_single_scenario(cfg, run_dir))

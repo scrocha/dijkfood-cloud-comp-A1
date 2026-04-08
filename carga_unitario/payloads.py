@@ -2,10 +2,102 @@
 
 import os
 import random
+from pathlib import Path
+from urllib.parse import urlparse
 import uuid
 from datetime import datetime, timezone
 
 from faker import Faker
+
+_ENV_DIR = Path(__file__).resolve().parent
+_ROOT_ENV = _ENV_DIR.parent / ".env"
+_PACKAGE_ENV = _ENV_DIR / ".env"
+_VITE_TO_URL = {
+    "VITE_CADASTRO_URL": "CADASTRO_URL",
+    "VITE_ROTAS_URL": "ROTAS_URL",
+    "VITE_PEDIDOS_URL": "PEDIDOS_URL",
+}
+# Chaves vindas do .env mesclado sobrescrevem o shell (evita export antigo tipo SEU-ALB).
+_FORCE_FROM_DOTENV = frozenset({
+    "CADASTRO_URL", "ROTAS_URL", "PEDIDOS_URL",
+    "VITE_CADASTRO_URL", "VITE_ROTAS_URL", "VITE_PEDIDOS_URL",
+    "VITE_BACKEND_TARGET",
+})
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    text = path.read_text(encoding="utf-8")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        val = val.strip()
+        if (len(val) >= 2 and val[0] == val[-1]) and val[0] in "\"'":
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def _load_dotenv_merged() -> None:
+    """Mescla `.env` na raiz do repo e `carga_unitario/.env` (este sobrescreve chaves do primeiro).
+
+    Para URLs de backend e VITE_*, valores do arquivo **substituem** o shell (prioridade do .env).
+    Demais chaves: só entram se não estiverem no ambiente.
+    Com VITE_BACKEND_TARGET=docker não propaga VITE_* → CADASTRO_URL (usa padrão localhost).
+    """
+    merged: dict[str, str] = {}
+    if _ROOT_ENV.is_file():
+        merged.update(_parse_env_file(_ROOT_ENV))
+    if _PACKAGE_ENV.is_file():
+        merged.update(_parse_env_file(_PACKAGE_ENV))
+
+    for key, val in merged.items():
+        if key in _FORCE_FROM_DOTENV:
+            os.environ[key] = val
+        elif key not in os.environ:
+            os.environ[key] = val
+
+    if os.getenv("VITE_BACKEND_TARGET", "").lower() == "docker":
+        return
+    for vite_key, url_key in _VITE_TO_URL.items():
+        if vite_key in os.environ:
+            os.environ[url_key] = os.environ[vite_key]
+
+
+def _apply_url_constants() -> None:
+    global CADASTRO_URL, PEDIDOS_URL, ROTAS_URL
+    CADASTRO_URL = os.getenv("CADASTRO_URL", "http://localhost:8002")
+    PEDIDOS_URL = os.getenv("PEDIDOS_URL", "http://localhost:8004")
+    ROTAS_URL = os.getenv("ROTAS_URL", "http://localhost:8003")
+
+
+def reload_env_and_urls() -> None:
+    """Relê arquivos `.env` e atualiza CADASTRO_URL / ROTAS_URL / PEDIDOS_URL no módulo."""
+    _load_dotenv_merged()
+    _apply_url_constants()
+
+
+def urls_source_line() -> str | None:
+    parts: list[str] = []
+    if _ROOT_ENV.is_file():
+        parts.append(str(_ROOT_ENV.resolve()))
+    if _PACKAGE_ENV.is_file():
+        parts.append(str(_PACKAGE_ENV.resolve()))
+    if not parts:
+        return None
+    return "env file(s): " + " | ".join(parts)
+
 
 fake = Faker("pt_BR")
 
@@ -21,9 +113,41 @@ CARDAPIO = {
     "Mexicana": ["Taco de Carne", "Burrito Misto", "Nachos com Guacamole"],
 }
 
-CADASTRO_URL = os.getenv("CADASTRO_URL", "http://localhost:8002")
-PEDIDOS_URL = os.getenv("PEDIDOS_URL", "http://localhost:8004")
-ROTAS_URL = os.getenv("ROTAS_URL", "http://localhost:8003")
+CADASTRO_URL = "http://localhost:8002"
+PEDIDOS_URL = "http://localhost:8004"
+ROTAS_URL = "http://localhost:8003"
+_load_dotenv_merged()
+_apply_url_constants()
+
+
+def target_environment_line() -> str:
+    """Resumo do destino da carga (Docker local vs AWS ALB / outro)."""
+    urls = (CADASTRO_URL, ROTAS_URL, PEDIDOS_URL)
+
+    def host_of(u: str) -> str:
+        return (urlparse(u).hostname or "").lower()
+
+    def is_local(u: str) -> bool:
+        h = host_of(u)
+        return h in ("localhost", "127.0.0.1") or h.endswith(".local")
+
+    def is_aws_alb(u: str) -> bool:
+        return "amazonaws.com" in host_of(u)
+
+    if all(is_local(u) for u in urls):
+        label = "Docker (localhost — portas padrão 8002/8003/8004 no compose)"
+    elif all(is_aws_alb(u) for u in urls):
+        hn = host_of(CADASTRO_URL) or CADASTRO_URL
+        label = f"AWS ALB ({hn})"
+    else:
+        label = "destino misto ou não reconhecido"
+
+    if len(set(urls)) == 1:
+        return f"alvo: {label}  base_url={CADASTRO_URL}"
+    return (
+        f"alvo: {label}  "
+        f"cadastro={CADASTRO_URL}  rotas={ROTAS_URL}  pedidos={PEDIDOS_URL}"
+    )
 
 
 def _coord():

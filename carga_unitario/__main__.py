@@ -11,6 +11,8 @@ def main():
 
     if not args or args[0] in ("-h", "--help"):
         print("Uso: python -m carga_unitario <combo.json> [--destroy-after]")
+        print("     URLs: .env na raiz + carga_unitario/.env (pacote sobrescreve raiz); VITE_* como demo-ui.")
+        print("           CADASTRO/ROTAS/PEDIDOS e VITE_* do arquivo substituem export no shell.")
         print("     python -m carga_unitario --list")
         print("     --destroy-after  ao fim roda clear_data_only.py (DDL Postgres + esvaziar Dynamo; mantém ECS/ALB)")
         print("                      Para remover infra: uv run python destroy.py")
