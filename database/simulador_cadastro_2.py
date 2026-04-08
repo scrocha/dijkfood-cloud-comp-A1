@@ -8,10 +8,12 @@ import os
 import json
 from pathlib import Path
 
-RESTAURANTES_POR_SEGUNDO = 35
-PRODUTOS_POR_RESTAURANTE = 3
-ENTREGADORES_POR_SEGUNDO = 35
-USUARIOS_POR_SEGUNDO = 35
+# Ajuste as taxas aqui para bater o número que desejar por segundo.
+# Atualmente somando tudo (2+2+2+(2*3)) = 12 requisições HTTP por segundo!
+USUARIOS_POR_SEGUNDO = 2
+ENTREGADORES_POR_SEGUNDO = 2
+RESTAURANTES_POR_SEGUNDO = 2
+PRODUTOS_POR_RESTAURANTE = 3 
 
 fake = Faker('pt_BR')
 json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
@@ -54,27 +56,28 @@ async def call_api(client, endpoint, data):
     global itens_inseridos, total_reqs_http, todas_latencias
     start = time.time()
     try:
-        resp = await client.post(f"{API_URL}{endpoint}", json=data, timeout=15.0)
+        # Timeout reduzido: se a API engasgar, queremos ver o erro rápido
+        resp = await client.post(f"{API_URL}{endpoint}", json=data, timeout=5.0)
         lat = time.time() - start
         todas_latencias.append(lat)
         
-        if resp.status_code == 201:
-            # Como enviamos uma lista (batch), somamos a quantidade de itens na lista
-            itens_inseridos += len(data) 
+        if resp.status_code in [200, 201]:
+            itens_inseridos += 1 # Agora cada chamada é apenas 1 item
+            
         total_reqs_http += 1
     except Exception as e:
         lat = time.time() - start
         todas_latencias.append(lat)
         total_reqs_http += 1
-        print(f"Erro na requisição {endpoint}: {e}")
+        # Comentado para não poluir o terminal durante o bombardeio, 
+        # mas você pode descomentar se quiser ver os timeouts
+        # print(f"Erro na requisição {endpoint}: {e}")
 
 async def simular_ciclo(client):
-    usuarios_lote = []
-    entregadores_lote = []
-    restaurantes_lote = []
+    tasks = []
     restaurantes_criados = []
 
-    # 1. Prepara os Lotes (Listas de Dicionários)
+    # 1. Enfileira as tarefas de Usuários
     for _ in range(USUARIOS_POR_SEGUNDO):
         user = {
             "user_id": str(uuid.uuid4()), 
@@ -85,8 +88,10 @@ async def simular_ciclo(client):
             "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
         }
-        usuarios_lote.append(user)
+        # ATENÇÃO: Ajuste a rota para a sua rota de criação INDIVIDUAL de usuário
+        tasks.append(call_api(client, "/cadastro", user)) 
 
+    # 2. Enfileira as tarefas de Entregadores
     for _ in range(ENTREGADORES_POR_SEGUNDO):
         entregador = {
             "entregador_id": str(uuid.uuid4()), 
@@ -95,8 +100,10 @@ async def simular_ciclo(client):
             "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
         }
-        entregadores_lote.append(entregador)
+        # ATENÇÃO: Ajuste a rota se necessário
+        tasks.append(call_api(client, "/cadastro/entregadores", entregador))
 
+    # 3. Enfileira as tarefas de Restaurantes
     for _ in range(RESTAURANTES_POR_SEGUNDO):
         rest_id = str(uuid.uuid4())
         cozinha = random.choice(TIPOS_COZINHA)
@@ -108,34 +115,29 @@ async def simular_ciclo(client):
             "endereco_latitude": random.uniform(LAT_MIN, LAT_MAX),
             "endereco_longitude": random.uniform(LON_MIN, LON_MAX)
         }
-        restaurantes_lote.append(restaurante)
+        # ATENÇÃO: Ajuste a rota se necessário
+        tasks.append(call_api(client, "/cadastro/restaurantes", restaurante))
 
-    # 2. Dispara os Lotes apontando para as rotas /batch
-    # Apenas 3 requisições HTTP vão transportar as centenas de itens
-    tasks_lote_1 = [
-        call_api(client, "/cadastro/batch", usuarios_lote),
-        call_api(client, "/cadastro/entregadores/batch", entregadores_lote),
-        call_api(client, "/cadastro/restaurantes/batch", restaurantes_lote)
-    ]
-    await asyncio.gather(*tasks_lote_1)
+    # 4. Dispara todas as requisições de uma vez (Assíncrono)
+    await asyncio.gather(*tasks)
 
-    # 3. Prepara o lote de Produtos (depende dos restaurantes criados)
-    produtos_lote = []
+    # 5. Prepara e dispara os Produtos (depende dos restaurantes criados)
+    tasks_produtos = []
     for rest_id, cozinha in restaurantes_criados:
         pratos_disponiveis = CARDAPIO.get(cozinha, CARDAPIO["Brasileira"])
         escolhidos = random.sample(pratos_disponiveis, k=PRODUTOS_POR_RESTAURANTE)
         for p_nome in escolhidos:
             prod = {"prod_id": str(uuid.uuid4()), "nome": p_nome, "rest_id": rest_id}
-            produtos_lote.append(prod)
+            # ATENÇÃO: Ajuste a rota se necessário
+            tasks_produtos.append(call_api(client, "/cadastro/produtos", prod))
 
-    # 4. Dispara 1 única requisição HTTP com todos os produtos do ciclo
-    if produtos_lote:
-        await asyncio.gather(call_api(client, "/cadastro/produtos/batch", produtos_lote))
+    if tasks_produtos:
+        await asyncio.gather(*tasks_produtos)
 
 async def workload_shooter(client):
     """
-    Atirador constante (Open Workload).
-    Dispara os pacotes assincronamente a cada 1 segundo sem aguardar que o anterior responda.
+    Atirador constante.
+    Dispara as requisições a cada 1 segundo.
     """
     while True:
         asyncio.create_task(simular_ciclo(client))
@@ -144,7 +146,7 @@ async def workload_shooter(client):
 async def display_metrics():
     """Mostra as métricas a cada 2 segundos"""
     while True:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
         
         global todas_latencias
         if len(todas_latencias) > 50000:
@@ -152,14 +154,16 @@ async def display_metrics():
             
         if len(todas_latencias) > 0:
             p95 = sorted(todas_latencias)[int(len(todas_latencias) * 0.95)] * 1000
-            print(f"[MÉTRICAS] Reqs HTTP: {total_reqs_http} | Itens no BD: {itens_inseridos} | P95 Global: {p95:.2f}ms")
+            print(f"[MÉTRICAS] Reqs HTTP (Total): {total_reqs_http} | Inseridos: {itens_inseridos} | P95 Global: {p95:.2f}ms")
         else:
             print("[MÉTRICAS] Aguardando requisições...")
 
 async def main():
-    print("Simulador Carga OPEN WORKLOAD ativado. Roteamento via BATCH.")
+    print("Simulador Carga OPEN WORKLOAD ativado. Roteamento INDIVIDUAL (Sem Batch).")
     
-    async with httpx.AsyncClient(limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500)) as client:
+    # Aumentamos o limite de conexões para aguentar o tranco no seu PC local
+    limits = httpx.Limits(max_connections=2000, max_keepalive_connections=1000)
+    async with httpx.AsyncClient(limits=limits) as client:
         await asyncio.gather(
             workload_shooter(client),
             display_metrics()
