@@ -12,7 +12,8 @@ def main():
     if not args or args[0] in ("-h", "--help"):
         print("Uso: python -m carga_unitario <combo.json> [--destroy-after]")
         print("     python -m carga_unitario --list")
-        print("     --destroy-after  ao fim roda destroy.py --soft (ECS/ALB/Dynamo + DDL Postgres)")
+        print("     --destroy-after  ao fim roda clear_data_only.py (DDL Postgres + esvaziar Dynamo; mantém ECS/ALB)")
+        print("                      Para remover infra: uv run python destroy.py")
         sys.exit(0)
 
     destroy_after = False

@@ -1,6 +1,6 @@
 [
-  {"scenario": "cadastro_get_entregador", "rps": 10, "duration": 120},
-  {"scenario": "cadastro_post_usuario", "rps": 10, "duration": 120},
+  {"scenario": "cadastro_post_usuario", "rps": 5, "duration": 120},
   {"scenario": "cadastro_post_restaurante", "rps": 10, "duration": 120},
-  {"scenario": "rotas_rota_entrega", "rps": 10, "duration": 120}
+  {"scenario": "rotas_rota_entrega", "rps": 10, "duration": 120},
+
 ]

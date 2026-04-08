@@ -137,9 +137,9 @@ def run_from_json(json_path: str, destroy_after: bool = False):
 
     if destroy_after:
         root = Path(__file__).resolve().parent.parent
-        destroy_py = root / "destroy.py"
-        print(f"Executando destroy após carga: {destroy_py} --soft")
-        subprocess.run([sys.executable, str(destroy_py), "--soft"], cwd=str(root))
+        clear_py = root / "clear_data_only.py"
+        print(f"Executando limpeza de dados após carga: {clear_py}")
+        subprocess.run([sys.executable, str(clear_py)], cwd=str(root))
 
 
 def run_internal_single(cfg_json: str, run_dir_str: str):
