@@ -1,4 +1,3 @@
-import { ApiError } from "../lib/http";
 import { patchOrderStatus, putDriverLocation, type OrderStatus } from "../api/pedidos";
 import { postRotaEntrega, type Ponto } from "../api/rotas";
 import {
@@ -9,6 +8,7 @@ import {
   KITCHEN_STEP_MS,
   LOCATION_TICK_MS,
 } from "../config/demoTiming";
+import { ApiError } from "../lib/http";
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -88,7 +88,7 @@ function positionOnPolyline(pts: Ponto[], t: number): Ponto {
   const p1 = pts[i + 1];
   return {
     lat: p0.lat + u * (p1.lat - p0.lat),
-      lon: p0.lon + u * (p1.lon - p0.lon),
+    lon: p0.lon + u * (p1.lon - p0.lon),
   };
 }
 
@@ -109,16 +109,63 @@ export type RunDemoPipelineArgs = {
   restaurant: Ponto;
   customer: Ponto;
   entregadorId: string;
+  entregadorPos: Ponto;
   signal: AbortSignal;
   onPhase: (phase: string) => void;
 };
+
+async function simulateTravel(
+  entregadorId: string,
+  orderId: string,
+  origem: Ponto,
+  destino: Ponto,
+  signal: AbortSignal,
+  onPhase: (phase: string) => void,
+  phasePrefix: string
+): Promise<void> {
+  let polyline: Ponto[] = [];
+  let durationSec = 0;
+
+  try {
+    const rota = await postRotaEntrega(origem, destino);
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    polyline = polylineFromRota(rota.dados_rota.percursos);
+    if (polyline.length < 2) {
+      polyline = fallbackPolyline(origem, destino, 24);
+    }
+    durationSec = deliverySecondsFromDistance(rota.dados_rota.distancia_metros);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (e instanceof ApiError && e.status === 404) {
+      polyline = fallbackPolyline(origem, destino, 24);
+      durationSec = randomFallbackSeconds();
+    } else {
+      throw e;
+    }
+  }
+
+  const durationMs = durationSec * 1000;
+  const steps = Math.max(2, Math.ceil(durationMs / LOCATION_TICK_MS));
+  onPhase(`${phasePrefix} (~${Math.round(durationSec)}s)`);
+
+  for (let k = 0; k < steps; k++) {
+    const t = k / (steps - 1);
+    const pos = positionOnPolyline(polyline, t);
+    await putDriverLocation(entregadorId, {
+      lat: pos.lat,
+      lng: pos.lon,
+      order_id: orderId,
+    });
+    await sleep(LOCATION_TICK_MS, signal);
+  }
+}
 
 /**
  * Pipeline serial de PATCH + rota + PUTs + DELIVERED.
  * O poll do pedido corre em paralelo (quem chamou deve manter).
  */
 export async function runDemoPipeline(args: RunDemoPipelineArgs): Promise<void> {
-  const { orderId, restaurant, customer, entregadorId, signal, onPhase } = args;
+  const { orderId, restaurant, customer, entregadorId, entregadorPos, signal, onPhase } = args;
 
   onPhase("Cozinha: preparando");
   await sleep(KITCHEN_STEP_MS, signal);
@@ -128,47 +175,34 @@ export async function runDemoPipeline(args: RunDemoPipelineArgs): Promise<void> 
   await sleep(KITCHEN_STEP_MS, signal);
   await patchStatus(orderId, "READY_FOR_PICKUP", undefined, signal);
 
+  // Simula o entregador indo até o restaurante
+  await simulateTravel(
+    entregadorId,
+    orderId,
+    entregadorPos,
+    restaurant,
+    signal,
+    onPhase,
+    "Entregador indo ao restaurante"
+  );
+
   onPhase("Retirada");
   await sleep(KITCHEN_STEP_MS, signal);
   await patchStatus(orderId, "PICKED_UP", entregadorId, signal);
 
-  onPhase("A caminho (rota)");
+  onPhase("A caminho do cliente");
   await patchStatus(orderId, "IN_TRANSIT", undefined, signal);
 
-  let polyline: Ponto[];
-  let durationSec: number;
-
-  try {
-    const rota = await postRotaEntrega(restaurant, customer);
-    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    polyline = polylineFromRota(rota.dados_rota.percursos);
-    if (polyline.length < 2) {
-      polyline = fallbackPolyline(restaurant, customer, 24);
-    }
-    durationSec = deliverySecondsFromDistance(rota.dados_rota.distancia_metros);
-  } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") throw e;
-    if (e instanceof ApiError && e.status === 404) {
-      polyline = fallbackPolyline(restaurant, customer, 24);
-      durationSec = randomFallbackSeconds();
-    } else {
-      throw e;
-    }
-  }
-
-  const steps = Math.max(2, Math.ceil((durationSec * 1000) / LOCATION_TICK_MS));
-  onPhase(`Entrega simulada (~${Math.round(durationSec)}s)`);
-
-  for (let k = 0; k < steps; k++) {
-    const t = steps <= 1 ? 1 : k / (steps - 1);
-    const pos = positionOnPolyline(polyline, t);
-    await putDriverLocation(entregadorId, {
-      lat: pos.lat,
-      lng: pos.lon,
-      order_id: orderId,
-    });
-    await sleep(LOCATION_TICK_MS, signal);
-  }
+  // Simula o entregador indo até o cliente
+  await simulateTravel(
+    entregadorId,
+    orderId,
+    restaurant,
+    customer,
+    signal,
+    onPhase,
+    "Entrega em curso"
+  );
 
   onPhase("Entregue");
   await patchStatus(orderId, "DELIVERED", undefined, signal);
