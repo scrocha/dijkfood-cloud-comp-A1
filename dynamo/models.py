@@ -10,6 +10,10 @@ class OrderStatus(str, Enum):
     IN_TRANSIT = "IN_TRANSIT"
     DELIVERED = "DELIVERED"
 
+class DriverStatus(str, Enum):
+    LIVRE = "LIVRE"
+    EM_ENTREGA = "EM_ENTREGA"
+
 ORDER_FLOW = {
     OrderStatus.CONFIRMED: [OrderStatus.PREPARING],
     OrderStatus.PREPARING: [OrderStatus.READY_FOR_PICKUP],

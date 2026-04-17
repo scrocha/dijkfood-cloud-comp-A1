@@ -6,7 +6,7 @@ import time
 import os
 import httpx
 from decimal import Decimal
-from .models import OrderCreate, OrderStatus, ORDER_FLOW
+from .models import OrderCreate, OrderStatus, ORDER_FLOW, DriverStatus
 
 class OrderRepository:
     def __init__(self):
@@ -75,9 +75,10 @@ class OrderRepository:
         expr_attr_names = {'#s': 'status'}
 
         # Se enviou entregador_id, salva nos metadados (importante para o SQL)
-        if entregador_id:
+        final_entregador_id = entregador_id or order.get('entregador_id')
+        if final_entregador_id:
             update_expr += ", entregador_id = :entregador_id"
-            expr_attr_values[':entregador_id'] = entregador_id
+            expr_attr_values[':entregador_id'] = final_entregador_id
 
         transact_items = [
             {
@@ -102,7 +103,56 @@ class OrderRepository:
                 }
             }
         ]
-        self.client.transact_write_items(TransactItems=transact_items)
+
+        # Lógica de transição de status do entregador
+        if next_status == OrderStatus.PICKED_UP:
+            if not final_entregador_id:
+                raise ValueError("entregador_id é obrigatório para o status PICKED_UP")
+            
+            # Garante que o entregador está LIVRE antes de assumir o pedido
+            transact_items.append({
+                'Update': {
+                    'TableName': self.table_name,
+                    'Key': {'PK': {'S': f'DRIVER#{final_entregador_id}'}, 'SK': {'S': 'LATEST'}},
+                    'UpdateExpression': "SET #s = :busy, GSI2PK = :busy_gsi, order_id = :order_id",
+                    'ConditionExpression': "#s = :free OR attribute_not_exists(#s)",
+                    'ExpressionAttributeNames': {'#s': 'status'},
+                    'ExpressionAttributeValues': self._to_dynamo_dict({
+                        ':busy': DriverStatus.EM_ENTREGA.value,
+                        ':busy_gsi': f'DRIVER_STATUS#{DriverStatus.EM_ENTREGA.value}',
+                        ':free': DriverStatus.LIVRE.value,
+                        ':order_id': order_id
+                    })
+                }
+            })
+        
+        elif next_status == OrderStatus.DELIVERED:
+            if final_entregador_id:
+                # Libera o entregador
+                transact_items.append({
+                    'Update': {
+                        'TableName': self.table_name,
+                        'Key': {'PK': {'S': f'DRIVER#{final_entregador_id}'}, 'SK': {'S': 'LATEST'}},
+                        'UpdateExpression': "SET #s = :free, GSI2PK = :free_gsi REMOVE order_id",
+                        'ExpressionAttributeNames': {'#s': 'status'},
+                        'ExpressionAttributeValues': self._to_dynamo_dict({
+                            ':free': DriverStatus.LIVRE.value,
+                            ':free_gsi': f'DRIVER_STATUS#{DriverStatus.LIVRE.value}'
+                        })
+                    }
+                })
+
+        try:
+            self.client.transact_write_items(TransactItems=transact_items)
+        except self.client.exceptions.TransactionCanceledException as e:
+            reasons = e.response.get('CancellationReasons', [])
+            if any(r.get('Code') == 'ConditionalCheckFailed' for r in reasons):
+                # Identifica se foi o status do pedido ou do entregador
+                if reasons[0].get('Code') == 'ConditionalCheckFailed':
+                    raise ValueError(f"Pedido {order_id} já mudou de status ou não está mais em {current_status}.")
+                if len(reasons) > 2 and reasons[2].get('Code') == 'ConditionalCheckFailed':
+                    raise ValueError(f"Entregador {final_entregador_id} não está disponível (LIVRE).")
+            raise e
 
         # Se o pedido foi entregue, condensa e sincroniza com o PostgreSQL
         if next_status == OrderStatus.DELIVERED:
@@ -198,18 +248,39 @@ class LocationRepository:
 
     def update_driver_location(self, driver_id: str, lat: float, lng: float, order_id: str = None):
         now = datetime.now(timezone.utc).isoformat()
-        item = {
-            'PK': f'DRIVER#{driver_id}',
-            'SK': 'LATEST',
-            'driver_id': driver_id,
-            'order_id': order_id,
-            'lat': str(lat),
-            'lng': str(lng),
-            'updated_at': now
+        
+        # Usamos UpdateItem para inicializar o status se não existir e não sobrescrever se existir
+        update_expr = "SET lat = :lat, lng = :lng, updated_at = :now, #s = if_not_exists(#s, :default_status), GSI2PK = if_not_exists(GSI2PK, :default_gsi2pk), GSI2SK = if_not_exists(GSI2SK, :driver_id), driver_id = if_not_exists(driver_id, :driver_id)"
+        expr_values = {
+            ':lat': str(lat),
+            ':lng': str(lng),
+            ':now': now,
+            ':default_status': DriverStatus.LIVRE.value,
+            ':default_gsi2pk': f'DRIVER_STATUS#{DriverStatus.LIVRE.value}',
+            ':driver_id': driver_id
         }
-        self.table.put_item(Item=item)
-        return item
+        expr_names = {'#s': 'status'}
+
+        if order_id:
+            update_expr += ", order_id = :order_id"
+            expr_values[':order_id'] = order_id
+
+        response = self.table.update_item(
+            Key={'PK': f'DRIVER#{driver_id}', 'SK': 'LATEST'},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames=expr_names,
+            ExpressionAttributeValues=expr_values,
+            ReturnValues="ALL_NEW"
+        )
+        return response.get('Attributes')
 
     def get_driver_location(self, driver_id: str):
         response = self.table.get_item(Key={'PK': f'DRIVER#{driver_id}', 'SK': 'LATEST'})
         return response.get('Item')
+
+    def get_free_drivers(self):
+        response = self.table.query(
+            IndexName='StatusIndex',
+            KeyConditionExpression=Key('GSI2PK').eq(f'DRIVER_STATUS#{DriverStatus.LIVRE.value}')
+        )
+        return response.get('Items', [])
