@@ -438,28 +438,33 @@ async def checkout(body: CheckoutRequest):
 
     client: httpx.AsyncClient = app.state.http
 
-    usuario = await _request_json(
+    # Paralelização das consultas iniciais (Usuário, Restaurante e Entregadores Livres)
+    user_task = _request_json(
         client,
         "GET",
         f"{DATABASE_SERVICE_URL}/cadastro/usuarios/{body.customer_id}",
         timeout_s=TIMEOUT_DB_S,
     )
-    restaurante = await _request_json(
+    rest_task = _request_json(
         client,
         "GET",
         f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/{body.restaurant_id}",
         timeout_s=TIMEOUT_DB_S,
     )
-
-    user_lat, user_lon = _coerce_lat_lon(usuario)
-    rest_lat, rest_lon = _coerce_lat_lon(restaurante)
-
-    entregadores = await _request_json(
+    drivers_task = _request_json(
         client,
         "GET",
         f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free",
         timeout_s=TIMEOUT_ORDER_S,
     )
+
+    usuario, restaurante, entregadores = await asyncio.gather(
+        user_task, rest_task, drivers_task
+    )
+
+    user_lat, user_lon = _coerce_lat_lon(usuario)
+    rest_lat, rest_lon = _coerce_lat_lon(restaurante)
+
     if not isinstance(entregadores, list):
         raise HTTPException(
             status_code=502,
