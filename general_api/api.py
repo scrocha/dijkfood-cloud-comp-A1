@@ -331,6 +331,104 @@ async def cadastrar_entregador(body: CourierCreate):
     return {"mensagem": "Entregador cadastrado e ativo!", "id": courier_id}
 
 
+@app.post("/usuarios/batch", status_code=201)
+async def cadastrar_usuarios_batch(body: list[UserCreate]):
+    client: httpx.AsyncClient = app.state.http
+    payload = []
+    for u in body:
+        payload.append(
+            {
+                "user_id": str(uuid.uuid4()),
+                "primeiro_nome": u.first_name,
+                "ultimo_nome": u.last_name,
+                "email": u.email,
+                "telefone": u.phone,
+                "endereco_latitude": u.lat,
+                "endereco_longitude": u.lng,
+            }
+        )
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/usuarios/batch",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/restaurantes/batch", status_code=201)
+async def cadastrar_restaurantes_batch(body: list[RestaurantCreate]):
+    client: httpx.AsyncClient = app.state.http
+    payload = []
+    for r in body:
+        payload.append(
+            {
+                "rest_id": str(uuid.uuid4()),
+                "nome": r.name,
+                "tipo_cozinha": r.cuisine_type,
+                "endereco_latitude": r.lat,
+                "endereco_longitude": r.lng,
+            }
+        )
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/batch",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/entregadores/batch", status_code=201)
+async def cadastrar_entregadores_batch(body: list[CourierCreate]):
+    client: httpx.AsyncClient = app.state.http
+
+    # 1. Preparar payloads e IDs
+    db_payload = []
+    entregadores_ids = []
+    for e in body:
+        cid = str(uuid.uuid4())
+        entregadores_ids.append(cid)
+        db_payload.append(
+            {
+                "entregador_id": cid,
+                "nome": e.name,
+                "tipo_veiculo": e.vehicle_type,
+                "endereco_latitude": e.lat,
+                "endereco_longitude": e.lng,
+            }
+        )
+
+    # 2. Cadastro no PostgreSQL (Batch)
+    await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/entregadores/batch",
+        json=db_payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+    # 3. Inicialização no DynamoDB (Batch via Order Service)
+    dynamo_payload = [
+        {
+            "driver_id": item["entregador_id"],
+            "lat": item["endereco_latitude"],
+            "lng": item["endereco_longitude"],
+        }
+        for item in db_payload
+    ]
+
+    await _request_json(
+        client,
+        "POST",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/batch-location",
+        json=dynamo_payload,
+        timeout_s=TIMEOUT_ORDER_S,
+    )
+
+    return {"mensagem": f"{len(body)} Entregadores cadastrados e ativos!"}
+
+
 @app.post("/checkout", status_code=201)
 async def checkout(body: CheckoutRequest):
     sim_restaurant = _require_http_base_url(
