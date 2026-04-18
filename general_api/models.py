@@ -30,3 +30,26 @@ class CourierLocationUpdate(BaseModel):
     lat: float
     lng: float
     order_id: Optional[str] = None
+
+
+class UserCreate(BaseModel):
+    first_name: str = Field(..., min_length=1)
+    last_name: str = Field(..., min_length=1)
+    email: str = Field(..., min_length=1)
+    phone: str = Field(..., min_length=1)
+    lat: float
+    lng: float
+
+
+class RestaurantCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    cuisine_type: str = Field(..., min_length=1)
+    lat: float
+    lng: float
+
+
+class CourierCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    vehicle_type: str = Field(..., min_length=1)
+    lat: float
+    lng: float

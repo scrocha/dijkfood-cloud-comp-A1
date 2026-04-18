@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List
-import asyncpg
-from contextlib import asynccontextmanager
-from database.models import Usuario, Restaurante, Entregador, Produto, Pedido
 import os
+from contextlib import asynccontextmanager
+from typing import List
+
+import asyncpg
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from database.models import Entregador, Pedido, Produto, Restaurante, Usuario
 
 # credenciais do banco
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -262,6 +264,32 @@ async def obter_entregador(entregador_id: str, conn = Depends(get_db_connection)
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/cadastro/entregadores/{entregador_id}/localizacao")
+async def atualizar_localizacao_entregador(
+    entregador_id: str,
+    lat: float,
+    lng: float,
+    conn=Depends(get_db_connection),
+):
+    """Atualiza a localização geográfica de um entregador"""
+
+    query = f"""
+        UPDATE {SCHEMA}.ENTREGADOR 
+        SET ENDERECO_LATITUDE = $1, ENDERECO_LONGITUDE = $2 
+        WHERE ENTREGADOR_ID = $3
+    """
+    try:
+        status = await conn.execute(query, lat, lng, entregador_id)
+        if status == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="Entregador não encontrado")
+        return {"mensagem": "Localização atualizada com sucesso!"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ==================================================
 # PRODUTOS

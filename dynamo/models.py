@@ -37,3 +37,9 @@ class DriverLocationUpdate(BaseModel):
     lat: float
     lng: float
     order_id: Optional[str] = None
+
+class BatchDriverLocationUpdate(BaseModel):
+    driver_id: str
+    lat: float
+    lng: float
+    status: Optional[DriverStatus] = DriverStatus.LIVRE

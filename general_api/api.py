@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -13,10 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from general_api.models import (
     CheckoutRequest,
+    CourierCreate,
     CourierLocationUpdate,
     CourierPickedUpWebhook,
     DeliveredWebhook,
+    RestaurantCreate,
     RestaurantReadyWebhook,
+    UserCreate,
 )
 
 
@@ -246,9 +250,183 @@ async def listar_entregadores_livres():
     return await _request_json(
         client,
         "GET",
-        f"{ORDER_SERVICE_URL}/pedidos/drivers/available",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free",
         timeout_s=TIMEOUT_ORDER_S,
     )
+
+
+@app.post("/usuarios", status_code=201)
+async def cadastrar_usuario(body: UserCreate):
+    client: httpx.AsyncClient = app.state.http
+    user_id = str(uuid.uuid4())
+    payload = {
+        "user_id": user_id,
+        "primeiro_nome": body.first_name,
+        "ultimo_nome": body.last_name,
+        "email": body.email,
+        "telefone": body.phone,
+        "endereco_latitude": body.lat,
+        "endereco_longitude": body.lng,
+    }
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/usuarios",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/restaurantes", status_code=201)
+async def cadastrar_restaurante(body: RestaurantCreate):
+    client: httpx.AsyncClient = app.state.http
+    rest_id = str(uuid.uuid4())
+    payload = {
+        "rest_id": rest_id,
+        "nome": body.name,
+        "tipo_cozinha": body.cuisine_type,
+        "endereco_latitude": body.lat,
+        "endereco_longitude": body.lng,
+    }
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/restaurantes",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/entregadores", status_code=201)
+async def cadastrar_entregador(body: CourierCreate):
+    client: httpx.AsyncClient = app.state.http
+    courier_id = str(uuid.uuid4())
+
+    # 1. Cadastro no PostgreSQL
+    db_payload = {
+        "entregador_id": courier_id,
+        "nome": body.name,
+        "tipo_veiculo": body.vehicle_type,
+        "endereco_latitude": body.lat,
+        "endereco_longitude": body.lng,
+    }
+    await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/entregadores",
+        json=db_payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+    # 2. Inicialização no DynamoDB (Order Service) para torná-lo LIVRE
+    order_payload = {"lat": body.lat, "lng": body.lng}
+    await _request_json(
+        client,
+        "PUT",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/{courier_id}/location",
+        json=order_payload,
+        timeout_s=TIMEOUT_ORDER_S,
+    )
+
+    return {"mensagem": "Entregador cadastrado e ativo!", "id": courier_id}
+
+
+@app.post("/usuarios/batch", status_code=201)
+async def cadastrar_usuarios_batch(body: list[UserCreate]):
+    client: httpx.AsyncClient = app.state.http
+    payload = []
+    for u in body:
+        payload.append(
+            {
+                "user_id": str(uuid.uuid4()),
+                "primeiro_nome": u.first_name,
+                "ultimo_nome": u.last_name,
+                "email": u.email,
+                "telefone": u.phone,
+                "endereco_latitude": u.lat,
+                "endereco_longitude": u.lng,
+            }
+        )
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/usuarios/batch",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/restaurantes/batch", status_code=201)
+async def cadastrar_restaurantes_batch(body: list[RestaurantCreate]):
+    client: httpx.AsyncClient = app.state.http
+    payload = []
+    for r in body:
+        payload.append(
+            {
+                "rest_id": str(uuid.uuid4()),
+                "nome": r.name,
+                "tipo_cozinha": r.cuisine_type,
+                "endereco_latitude": r.lat,
+                "endereco_longitude": r.lng,
+            }
+        )
+    return await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/batch",
+        json=payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+
+@app.post("/entregadores/batch", status_code=201)
+async def cadastrar_entregadores_batch(body: list[CourierCreate]):
+    client: httpx.AsyncClient = app.state.http
+
+    # 1. Preparar payloads e IDs
+    db_payload = []
+    entregadores_ids = []
+    for e in body:
+        cid = str(uuid.uuid4())
+        entregadores_ids.append(cid)
+        db_payload.append(
+            {
+                "entregador_id": cid,
+                "nome": e.name,
+                "tipo_veiculo": e.vehicle_type,
+                "endereco_latitude": e.lat,
+                "endereco_longitude": e.lng,
+            }
+        )
+
+    # 2. Cadastro no PostgreSQL (Batch)
+    await _request_json(
+        client,
+        "POST",
+        f"{DATABASE_SERVICE_URL}/cadastro/entregadores/batch",
+        json=db_payload,
+        timeout_s=TIMEOUT_DB_S,
+    )
+
+    # 3. Inicialização no DynamoDB (Batch via Order Service)
+    dynamo_payload = [
+        {
+            "driver_id": item["entregador_id"],
+            "lat": item["endereco_latitude"],
+            "lng": item["endereco_longitude"],
+        }
+        for item in db_payload
+    ]
+
+    await _request_json(
+        client,
+        "POST",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/batch-location",
+        json=dynamo_payload,
+        timeout_s=TIMEOUT_ORDER_S,
+    )
+
+    return {"mensagem": f"{len(body)} Entregadores cadastrados e ativos!"}
 
 
 @app.post("/checkout", status_code=201)
@@ -260,28 +438,33 @@ async def checkout(body: CheckoutRequest):
 
     client: httpx.AsyncClient = app.state.http
 
-    usuario = await _request_json(
+    # Paralelização das consultas iniciais (Usuário, Restaurante e Entregadores Livres)
+    user_task = _request_json(
         client,
         "GET",
         f"{DATABASE_SERVICE_URL}/cadastro/usuarios/{body.customer_id}",
         timeout_s=TIMEOUT_DB_S,
     )
-    restaurante = await _request_json(
+    rest_task = _request_json(
         client,
         "GET",
         f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/{body.restaurant_id}",
         timeout_s=TIMEOUT_DB_S,
     )
+    drivers_task = _request_json(
+        client,
+        "GET",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free",
+        timeout_s=TIMEOUT_ORDER_S,
+    )
+
+    usuario, restaurante, entregadores = await asyncio.gather(
+        user_task, rest_task, drivers_task
+    )
 
     user_lat, user_lon = _coerce_lat_lon(usuario)
     rest_lat, rest_lon = _coerce_lat_lon(restaurante)
 
-    entregadores = await _request_json(
-        client,
-        "GET",
-        f"{ORDER_SERVICE_URL}/pedidos/drivers/available",
-        timeout_s=TIMEOUT_ORDER_S,
-    )
     if not isinstance(entregadores, list):
         raise HTTPException(
             status_code=502,
@@ -556,6 +739,31 @@ async def webhook_courier_picked_up(body: CourierPickedUpWebhook):
 async def webhook_delivered(body: DeliveredWebhook):
     client: httpx.AsyncClient = app.state.http
 
+    # 1. Obter a última localização conhecida do entregador no Dynamo (onde ele finalizou a entrega)
+    try:
+        driver_loc = await _request_json(
+            client,
+            "GET",
+            f"{ORDER_SERVICE_URL}/pedidos/drivers/{body.courier_id}/location",
+            timeout_s=TIMEOUT_ORDER_S,
+        )
+        last_lat, last_lng = _coerce_lat_lon(driver_loc)
+
+        # 2. Persistir essa posição no PostgreSQL para que ele "aguarde" lá
+        await _request_json(
+            client,
+            "PATCH",
+            f"{DATABASE_SERVICE_URL}/cadastro/entregadores/{body.courier_id}/localizacao",
+            timeout_s=TIMEOUT_DB_S,
+            json={"lat": last_lat, "lng": last_lng},
+        )
+    except Exception as e:
+        # Se falhar a sincronização de pós-venda, logamos o erro mas não travamos o fluxo principal
+        print(
+            f"Erro ao sincronizar localização final do entregador {body.courier_id}: {e}"
+        )
+
+    # 3. Finalizar o pedido no serviço de ordens
     await _request_json(
         client,
         "PATCH",

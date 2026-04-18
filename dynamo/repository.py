@@ -1,12 +1,20 @@
-import boto3
-from boto3.dynamodb.conditions import Key
-from datetime import datetime, timezone
-import uuid
-import time
 import os
-import httpx
+import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
-from .models import OrderCreate, OrderStatus, ORDER_FLOW, DriverStatus
+
+import boto3
+import httpx
+from boto3.dynamodb.conditions import Key
+
+from .models import (
+    ORDER_FLOW,
+    BatchDriverLocationUpdate,
+    DriverStatus,
+    OrderCreate,
+    OrderStatus,
+)
+
 
 class OrderRepository:
     def __init__(self):
@@ -276,11 +284,44 @@ class LocationRepository:
 
     def get_driver_location(self, driver_id: str):
         response = self.table.get_item(Key={'PK': f'DRIVER#{driver_id}', 'SK': 'LATEST'})
-        return response.get('Item')
+        item = response.get('Item')
+        if item:
+            # Garantir que lat/lng retornem como floats para evitar problemas de coerção
+            if 'lat' in item:
+                item['lat'] = float(item['lat'])
+            if 'lng' in item:
+                item['lng'] = float(item['lng'])
+        return item
 
     def get_free_drivers(self):
         response = self.table.query(
             IndexName='StatusIndex',
             KeyConditionExpression=Key('GSI2PK').eq(f'DRIVER_STATUS#{DriverStatus.LIVRE.value}')
         )
-        return response.get('Items', [])
+        items = response.get('Items', [])
+        for item in items:
+            if 'lat' in item:
+                item['lat'] = float(item['lat'])
+            if 'lng' in item:
+                item['lng'] = float(item['lng'])
+        return items
+
+    def batch_update_drivers(self, drivers: list[BatchDriverLocationUpdate]):
+        now = datetime.now(timezone.utc).isoformat()
+        
+        with self.table.batch_writer() as batch:
+            for d in drivers:
+                status = d.status or DriverStatus.LIVRE
+                item = {
+                    'PK': f'DRIVER#{d.driver_id}',
+                    'SK': 'LATEST',
+                    'driver_id': d.driver_id,
+                    'lat': str(d.lat),
+                    'lng': str(d.lng),
+                    'status': status.value,
+                    'updated_at': now,
+                    'GSI2PK': f'DRIVER_STATUS#{status.value}',
+                    'GSI2SK': d.driver_id
+                }
+                batch.put_item(Item=item)
+        return {"status": "success", "count": len(drivers)}

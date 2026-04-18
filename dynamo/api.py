@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from .models import OrderCreate, OrderStatus, OrderStatusUpdate, DriverLocationUpdate
+from .models import OrderCreate, OrderStatus, OrderStatusUpdate, DriverLocationUpdate, BatchDriverLocationUpdate
 from .repository import OrderRepository, LocationRepository
 from typing import List, Optional
 
@@ -76,6 +76,13 @@ def update_location(driver_id: str, location: DriverLocationUpdate):
         return loc_repo.update_driver_location(
             driver_id, location.lat, location.lng, location.order_id
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/pedidos/drivers/batch-location")
+def batch_update_location(drivers: List[BatchDriverLocationUpdate]):
+    try:
+        return loc_repo.batch_update_drivers(drivers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
