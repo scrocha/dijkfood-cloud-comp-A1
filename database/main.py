@@ -332,6 +332,18 @@ async def cadastrar_produtos_batch(produtos: List[Produto], conn = Depends(get_d
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/cadastro/produtos/restaurante/{rest_id}", response_model=List[Produto])
+async def listar_produtos_por_restaurante(rest_id: str, conn=Depends(get_db_connection)):
+    """Lista produtos cadastrados para um restaurante."""
+
+    query = f"SELECT * FROM {SCHEMA}.PRODUTOS WHERE REST_ID = $1 ORDER BY NOME, PROD_ID"
+    try:
+        registros = await conn.fetch(query, rest_id)
+        return [dict(registro) for registro in registros]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================================================
 # PEDIDOS
 # ==================================================

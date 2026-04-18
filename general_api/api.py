@@ -78,8 +78,8 @@ class _OrderState:
         courier_id: str,
         restaurant: dict[str, float],
         customer: dict[str, float],
-        route_to_restaurant: dict[str, Any],
-        route_to_client: dict[str, Any],
+        route_to_restaurant: list[dict[str, float]],
+        route_to_client: list[dict[str, float]],
     ):
         self.order_id = order_id
         self.courier_id = courier_id
@@ -151,6 +151,39 @@ async def _request_json(
     if not resp.content:
         return None
     return resp.json()
+
+
+def _rota_para_pontos(rota_data: Any) -> list[dict[str, float]]:
+    """Converte uma rota do route-service (com 'percursos') em uma lista de pontos {lat, lon}."""
+
+    if not isinstance(rota_data, dict):
+        return []
+
+    percursos = rota_data.get("percursos")
+    if not isinstance(percursos, list):
+        return []
+
+    pontos: list[dict[str, float]] = []
+    for percurso in percursos:
+        if not isinstance(percurso, dict):
+            continue
+
+        for key in ("ponto_origem", "ponto_fim"):
+            ponto = percurso.get(key)
+            if not isinstance(ponto, dict):
+                continue
+            lat = ponto.get("lat")
+            lon = ponto.get("lon")
+            if lat is None or lon is None:
+                continue
+            pontos.append({"lat": float(lat), "lon": float(lon)})
+
+    # Remove duplicatas consecutivas
+    compactado: list[dict[str, float]] = []
+    for p in pontos:
+        if not compactado or p != compactado[-1]:
+            compactado.append(p)
+    return compactado
 
 
 def _coerce_lat_lon(obj: dict[str, Any]) -> tuple[float, float]:
@@ -510,6 +543,13 @@ async def checkout(body: CheckoutRequest):
     courier_id = drivers_norm[idx]["driver_id"]
     rota_ao_restaurante = escolha.get("rota_ao_restaurante")
 
+    rota_ao_restaurante_pontos = _rota_para_pontos(rota_ao_restaurante)
+    if not rota_ao_restaurante_pontos:
+        raise HTTPException(
+            status_code=502,
+            detail="Resposta inválida do route-service (rota_ao_restaurante sem percursos)",
+        )
+
     rota_final = await _request_json(
         client,
         "POST",
@@ -520,6 +560,16 @@ async def checkout(body: CheckoutRequest):
             "destino": {"lat": user_lat, "lon": user_lon},
         },
     )
+
+    rota_final_data = (
+        rota_final.get("dados_rota") if isinstance(rota_final, dict) else None
+    )
+    rota_final_pontos = _rota_para_pontos(rota_final_data)
+    if not rota_final_pontos:
+        raise HTTPException(
+            status_code=502,
+            detail="Resposta inválida do route-service (rota final sem percursos)",
+        )
 
     pedido = await _request_json(
         client,
@@ -558,7 +608,7 @@ async def checkout(body: CheckoutRequest):
             json={
                 "order_id": order_id,
                 "courier_id": courier_id,
-                "route": rota_ao_restaurante,
+                "route": rota_ao_restaurante_pontos,
                 "restaurant": {"lat": rest_lat, "lon": rest_lon},
                 "customer": {"lat": user_lat, "lon": user_lon},
             },
@@ -586,8 +636,8 @@ async def checkout(body: CheckoutRequest):
             courier_id=courier_id,
             restaurant={"lat": rest_lat, "lon": rest_lon},
             customer={"lat": user_lat, "lon": user_lon},
-            route_to_restaurant=rota_ao_restaurante,
-            route_to_client=rota_final,
+            route_to_restaurant=rota_ao_restaurante_pontos,
+            route_to_client=rota_final_pontos,
         )
 
     return {
@@ -610,20 +660,26 @@ async def _send_order_ready(order_id: str):
             st.restaurant_ready and st.courier_arrived
         ):
             return
+
         courier_id = st.courier_id
+        # Marcamos como enviado ANTES de chamar para evitar duplicidade em race conditions
+        st.order_ready_sent = True
 
-    await _request_json(
-        client,
-        "POST",
-        f"{sim_courier}/simulador/entregador/order-ready",
-        timeout_s=TIMEOUT_SIM_S,
-        json={"order_id": order_id, "courier_id": courier_id},
-    )
-
-    async with _state_lock:
-        st = _order_state.get(order_id)
-        if st:
-            st.order_ready_sent = True
+    try:
+        await _request_json(
+            client,
+            "POST",
+            f"{sim_courier}/simulador/entregador/order-ready",
+            timeout_s=TIMEOUT_SIM_S,
+            json={"order_id": order_id, "courier_id": courier_id},
+        )
+    except Exception as e:
+        # Se falhar o push pro simulador, revertemos o flag para tentar de novo no próximo GPS update
+        async with _state_lock:
+            st = _order_state.get(order_id)
+            if st:
+                st.order_ready_sent = False
+        print(f"[Orquestrador] Erro ao notificar simulador de entregador: {e}")
 
 
 @app.post("/webhook/restaurant-ready")

@@ -68,8 +68,11 @@ services:
       - "8004:8002"
     environment:
       AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
       DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
       DYNAMODB_TABLE_NAME: DijkfoodOrders
+      DYNAMODB_AUTO_CREATE: "1"
     depends_on:
       - dynamodb-local
 
@@ -80,6 +83,7 @@ services:
     container_name: general-api
     ports:
       - "8005:8000"
+    command: ["uvicorn", "general_api.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     environment:
       DATABASE_SERVICE_URL: http://database-service:8000
       ORDER_SERVICE_URL: http://order-service:8002
@@ -92,7 +96,45 @@ services:
       TIMEOUT_ROUTE_S: 30
       TIMEOUT_SIM_S: 5
       ARRIVAL_THRESHOLD_M: 10
+      SIM_RESTAURANT_URL: http://sim-restaurant:8006
+      SIM_COURIER_URL: http://sim-courier:8007
     depends_on:
       - database-service
       - route-service
       - order-service
+
+  sim-restaurant:
+    build:
+      context: .
+      dockerfile: simulador_restaurante/Dockerfile
+    container_name: sim-restaurant
+    ports:
+      - "8006:8006"
+    environment:
+      GENERAL_API_URL: http://general-api:8000
+    depends_on:
+      - general-api
+
+  sim-courier:
+    build:
+      context: .
+      dockerfile: simulador_entregadores/Dockerfile
+    container_name: sim-courier
+    ports:
+      - "8007:8007"
+    environment:
+      GENERAL_API_URL: http://general-api:8000
+    depends_on:
+      - general-api
+
+  sim-pedidos:
+    build:
+      context: .
+      dockerfile: simulador_pedidos/Dockerfile
+    container_name: sim-pedidos
+    ports:
+      - "8008:8005"
+    environment:
+      GENERAL_API_URL: http://general-api:8000
+    depends_on:
+      - general-api
