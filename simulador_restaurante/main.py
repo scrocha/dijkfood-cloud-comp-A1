@@ -2,7 +2,7 @@ import asyncio
 import random
 import os
 import httpx
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from contextlib import asynccontextmanager
 
 from simulador_restaurante.models import PrepareOrderRequest
@@ -29,9 +29,13 @@ async def _processar_preparo(order_id: str, restaurant_id: str):
     # Notifica que está pronto
     client: httpx.AsyncClient = app.state.http
     try:
+        webhook_payload = {
+            "order_id": order_id,
+            "restaurant_id": restaurant_id
+        }
         resp = await client.post(
             f"{GENERAL_API_URL}/webhook/restaurant-ready",
-            json={"order_id": order_id, "restaurant_id": restaurant_id}
+            json=webhook_payload
         )
         if resp.status_code >= 400:
             print(f"[Cozinha] Erro ao enviar webhook ({resp.status_code}): {resp.text}")
