@@ -20,4 +20,4 @@ COPY dynamo/ /app/dynamo/
 EXPOSE 8002
 
 # Comando para rodar a API usando o módulo dynamo
-CMD ["uvicorn", "dynamo.api:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uvicorn", "dynamo.api:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "4"]
