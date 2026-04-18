@@ -1,11 +1,16 @@
 import asyncio
 import os
-import httpx
-from fastapi import FastAPI, BackgroundTasks, HTTPException
 from contextlib import asynccontextmanager
 from typing import Dict
 
-from simulador_entregadores.models import GoToRestaurantRequest, OrderReadyRequest, GoToClientRequest
+import httpx
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+
+from simulador_entregadores.models import (
+    GoToClientRequest,
+    GoToRestaurantRequest,
+    OrderReadyRequest,
+)
 
 # Configurações
 GENERAL_API_URL = os.getenv("GENERAL_API_URL", "http://general-api:8000").rstrip("/")
@@ -59,12 +64,28 @@ async def go_to_restaurant(req: GoToRestaurantRequest, background_tasks: Backgro
         _order_ready_events[req.order_id] = event
         
         # 3. Fica em espera bloqueante nesta Task
+        ready = False
         try:
             await asyncio.wait_for(event.wait(), timeout=600) # 10 min de espera máx.
+            ready = True
         except asyncio.TimeoutError:
             print(f"[Worker] Timeout: Motoboy do pedido {req.order_id} cansou de esperar.")
         finally:
             _order_ready_events.pop(req.order_id, None)
+
+        if ready:
+            # 4. Simula pickup e notifica o orquestrador
+            await asyncio.sleep(1.0)
+            client: httpx.AsyncClient = app.state.http
+            try:
+                await client.post(
+                    f"{GENERAL_API_URL}/webhook/courier-picked-up",
+                    json={"order_id": req.order_id, "courier_id": req.courier_id},
+                )
+            except Exception as e:
+                print(
+                    f"[Worker] Erro ao notificar pickup do pedido {req.order_id} (courier {req.courier_id}): {e}"
+                )
 
     background_tasks.add_task(_fase_restaurante)
     return {"status": "moving_to_restaurant", "courier_id": req.courier_id}
@@ -91,28 +112,23 @@ async def go_to_client(req: GoToClientRequest, background_tasks: BackgroundTasks
     """
     async def _fase_entrega():
         print(f"[Worker] Courier {req.courier_id} iniciando rota de entrega para o Cliente.")
-        # 1. Simula tempo de pickup (1s)
+        # 1. Pequena espera antes de sair (1s)
         await asyncio.sleep(1.0)
-        
-        # 2. Notifica o pickup oficial para mudar status no Dynamo
+
         client: httpx.AsyncClient = app.state.http
-        await client.post(
-            f"{GENERAL_API_URL}/webhook/courier-picked-up",
-            json={"order_id": req.order_id, "courier_id": req.courier_id}
-        )
-        
-        # 3. Executa a rota até o cliente
+
+        # 2. Executa a rota até o cliente
         await _executar_trajeto(req.courier_id, req.order_id, req.route)
         
-        # 4. Finaliza a entrega
-        print(f"[Worker] Pedido {req.order_id} entregue com sucesso!")
+        # 3. Notifica a entrega finalizada
+        print(f"[Worker] Courier {req.courier_id} entregou o Pedido {req.order_id}!")
         await client.post(
             f"{GENERAL_API_URL}/webhook/delivered",
             json={"order_id": req.order_id, "courier_id": req.courier_id}
         )
 
     background_tasks.add_task(_fase_entrega)
-    return {"status": "moving_to_client"}
+    return {"status": "moving_to_client", "courier_id": req.courier_id}
 
 @app.get("/health")
 def health():
