@@ -14,6 +14,7 @@ class CheckoutRequest(BaseModel):
 
 class RestaurantReadyWebhook(BaseModel):
     order_id: str = Field(..., min_length=1)
+    restaurant_id: Optional[str] = None
 
 
 class CourierPickedUpWebhook(BaseModel):
