@@ -96,6 +96,7 @@ async def cadastrar_usuario(usuario: Usuario, conn = Depends(get_db_connection))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/cadastro/batch", status_code=201)
+@app.post("/cadastro/usuarios/batch", status_code=201)
 async def cadastrar_usuarios_batch(usuarios: List[Usuario], conn = Depends(get_db_connection)):
     """Cadastra múltiplos usuários de uma vez (Bulk Insert)"""
 
