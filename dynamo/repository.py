@@ -6,6 +6,7 @@ from decimal import Decimal
 import boto3
 import httpx
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from .models import (
     ORDER_FLOW,
@@ -25,6 +26,22 @@ class OrderRepository:
         self.dynamodb = boto3.resource('dynamodb', region_name=region, endpoint_url=endpoint_url)
         self.table = self.dynamodb.Table(self.table_name)
         self.client = boto3.client('dynamodb', region_name=region, endpoint_url=endpoint_url)
+
+        if os.getenv("DYNAMODB_AUTO_CREATE", "0").lower() in {"1", "true", "yes", "y"}:
+            self._ensure_table_exists()
+
+    def _ensure_table_exists(self) -> None:
+        try:
+            self.client.describe_table(TableName=self.table_name)
+            return
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code not in {"ResourceNotFoundException"}:
+                raise
+
+        from dynamo.setup_db import create_orders_table
+
+        create_orders_table(dynamodb=self.dynamodb)
 
     def create_order(self, order_data: OrderCreate):
         order_id = str(uuid.uuid4())
@@ -253,6 +270,27 @@ class LocationRepository:
         self.table_name = os.getenv("DYNAMODB_TABLE_NAME", "DijkfoodOrders")
         self.dynamodb = boto3.resource('dynamodb', region_name=region, endpoint_url=endpoint_url)
         self.table = self.dynamodb.Table(self.table_name)
+
+        if os.getenv("DYNAMODB_AUTO_CREATE", "0").lower() in {"1", "true", "yes", "y"}:
+            self._ensure_table_exists()
+
+    def _ensure_table_exists(self) -> None:
+        client = boto3.client(
+            "dynamodb",
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+            endpoint_url=os.getenv("DYNAMODB_ENDPOINT_URL"),
+        )
+        try:
+            client.describe_table(TableName=self.table_name)
+            return
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code not in {"ResourceNotFoundException"}:
+                raise
+
+        from dynamo.setup_db import create_orders_table
+
+        create_orders_table(dynamodb=self.dynamodb)
 
     def update_driver_location(self, driver_id: str, lat: float, lng: float, order_id: str = None):
         now = datetime.now(timezone.utc).isoformat()
