@@ -2,7 +2,6 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timezone
 import uuid
-import time
 import os
 import httpx
 from decimal import Decimal
@@ -276,11 +275,24 @@ class LocationRepository:
 
     def get_driver_location(self, driver_id: str):
         response = self.table.get_item(Key={'PK': f'DRIVER#{driver_id}', 'SK': 'LATEST'})
-        return response.get('Item')
+        item = response.get('Item')
+        if item:
+            # Garantir que lat/lng retornem como floats para evitar problemas de coerção
+            if 'lat' in item:
+                item['lat'] = float(item['lat'])
+            if 'lng' in item:
+                item['lng'] = float(item['lng'])
+        return item
 
     def get_free_drivers(self):
         response = self.table.query(
             IndexName='StatusIndex',
             KeyConditionExpression=Key('GSI2PK').eq(f'DRIVER_STATUS#{DriverStatus.LIVRE.value}')
         )
-        return response.get('Items', [])
+        items = response.get('Items', [])
+        for item in items:
+            if 'lat' in item:
+                item['lat'] = float(item['lat'])
+            if 'lng' in item:
+                item['lng'] = float(item['lng'])
+        return items
