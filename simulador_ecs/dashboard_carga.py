@@ -325,6 +325,49 @@ def check_cluster_exists():
     return False
 
 
+def get_dynamo_counts(table_name="DijkfoodOrders"):
+    """
+    Usa SCAN com Filtros para garantir que os dados sejam contados corretamente,
+    independente da integridade dos índices GSI.
+    """
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+        table = dynamodb.Table(table_name)
+        
+        # Scan completo para pegar tudo de uma vez
+        response = table.scan()
+        items = response.get('Items', [])
+        
+        # Continua o scan se houver paginação
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+            items.extend(response.get('Items', []))
+
+        counts = {
+            "CONFIRMED": 0, "PREPARING": 0, "READY_FOR_PICKUP": 0, 
+            "PICKED_UP": 0, "IN_TRANSIT": 0, "DELIVERED": 0
+        }
+        driver_counts = {"LIVRE": 0, "EM_ENTREGA": 0}
+
+        for item in items:
+            pk = item.get('PK', '')
+            status = item.get('status', item.get('Status', ''))
+            
+            if pk.startswith('ORDER#'):
+                if status in counts:
+                    counts[status] += 1
+            elif pk.startswith('DRIVER#'):
+                if status in driver_counts:
+                    driver_counts[status] += 1
+                elif not status: # Fallback para motorista sem status definido
+                    driver_counts["LIVRE"] += 1
+                    
+        return counts, driver_counts
+    except Exception as e:
+        return None, None
+
+
+
 # =========================================================================
 # CSS CUSTOMIZADO
 # =========================================================================
@@ -569,17 +612,52 @@ with tab_control:
 
 # ─── ABA LOGS ────────────────────────────────────────────────────────────
 with tab_logs:
-    st.markdown("### 📋 Logs dos Simuladores (CloudWatch)")
-    st.caption(f"Log Group: `{LOG_GROUP_NAME}`")
+    st.markdown("### 📋 Monitoramento e Logs")
+    st.caption(f"Acompanhe o estado do banco e os logs dos containers (CloudWatch: `{LOG_GROUP_NAME}`)")
 
-    log_tab_names = []
+    log_tab_names = ["📈 Tempo Real (DynamoDB)"]
     for sim_config in SIMULATORS.values():
         name = sim_config['DESCRIPTION'].split('(')[0].split('—')[0].strip()
         log_tab_names.append(name)
 
     log_tabs = st.tabs(log_tab_names)
 
-    for log_tab, (sim_key, sim_config) in zip(log_tabs, SIMULATORS.items()):
+    # Nova Aba de Tempo Real (DynamoDB)
+    with log_tabs[0]:
+        st.markdown("### 🟢 Controle Ativo - DynamoDB Scan")
+        
+        col_auto, col_btn = st.columns([1, 4])
+        with col_auto:
+            auto_refresh = st.checkbox("Auto-Atualizar (2s)", value=False, help="Atualiza a contagem quase em tempo real")
+        with col_btn:
+            if st.button("🔄 Atualizar Contagens", key="refresh_dynamo"):
+                pass
+        
+        counts, drivers = get_dynamo_counts()
+
+        if counts is not None:
+            st.markdown("#### 📦 Status dos Pedidos")
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("Confirmados", counts["CONFIRMED"])
+            c2.metric("Em Preparo", counts["PREPARING"], help="Cozinha")
+            c3.metric("Prontos", counts["READY_FOR_PICKUP"])
+            c4.metric("Coletados", counts["PICKED_UP"])
+            c5.metric("Em Trânsito", counts["IN_TRANSIT"], help="GPS Ativo")
+            c6.metric("Entregues", counts["DELIVERED"], help="Finalizados")
+            
+            st.markdown("#### 🏍️ Frota de Entregadores")
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Livres", drivers["LIVRE"])
+            d2.metric("Ocupados", drivers["EM_ENTREGA"])
+            d3.metric("Total", drivers["LIVRE"] + drivers["EM_ENTREGA"])
+        else:
+            st.warning("Não foi possível acessar a tabela DijkfoodOrders no momento.")
+
+        if auto_refresh:
+            time.sleep(2)
+            st.rerun()
+
+    for log_tab, (sim_key, sim_config) in zip(log_tabs[1:], SIMULATORS.items()):
         with log_tab:
             prefix = sim_config['LOG_STREAM_PREFIX']
             col_refresh, col_count = st.columns([1, 3])
