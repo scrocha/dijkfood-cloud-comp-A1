@@ -1,0 +1,122 @@
+{
+  "AWS_REGION": "us-east-1",
+  "CLUSTER_NAME": "dijkfood-simulators-cluster",
+  "SG_NAME": "dijkfood-sg-simulators",
+  "LOG_GROUP_NAME": "/ecs/dijkfood-simuladores",
+  "DEFAULT_CPU": "512",
+  "DEFAULT_MEMORY": "1024",
+  "SIM_ALB_NAME": "dijkfood-sim-alb",
+  "SIMULATORS": {
+    "general_api": {
+      "REPO_NAME": "dijkfood-sim-gateway",
+      "TASK_FAMILY": "dijkfood-sim-gateway-task",
+      "CONTAINER_NAME": "sim-gateway",
+      "CONTAINER_PORT": 8000,
+      "DOCKERFILE": "general_api/Dockerfile",
+      "LOG_STREAM_PREFIX": "sim-gateway",
+      "TYPE": "service",
+      "SERVICE_NAME": "dijkfood-sim-gateway-svc",
+      "TG_NAME": "df-sim-tg-gateway",
+      "HEALTH_CHECK_PATH": "/health",
+      "ALB_PRIORITY": null,
+      "ALB_PATH_PATTERNS": null,
+      "DESCRIPTION": "API Geral - Gateway Orquestrador",
+      "ENV_MAPPING": {
+        "DATABASE_SERVICE_URL": "{API_URL}",
+        "ORDER_SERVICE_URL": "{API_URL}",
+        "ROUTE_SERVICE_URL": "{API_URL}",
+        "SIM_RESTAURANT_URL": "{SIM_ALB_URL}",
+        "SIM_COURIER_URL": "{SIM_ALB_URL}"
+      },
+      "DESIRED_COUNT": 1,
+      "DEFAULT_CMD": null
+    },
+    "sim_pedidos": {
+      "REPO_NAME": "dijkfood-sim-clientes",
+      "TASK_FAMILY": "dijkfood-sim-clientes-task",
+      "CONTAINER_NAME": "sim-clientes",
+      "CONTAINER_PORT": 8005,
+      "DOCKERFILE": "simulador_pedidos/Dockerfile",
+      "LOG_STREAM_PREFIX": "sim-clientes",
+      "TYPE": "service",
+      "SERVICE_NAME": "dijkfood-sim-clientes-svc",
+      "TG_NAME": "df-sim-tg-clientes",
+      "HEALTH_CHECK_PATH": "/health",
+      "ALB_PRIORITY": 30,
+      "ALB_PATH_PATTERNS": [
+        "/simulador/cliente*"
+      ],
+      "DESCRIPTION": "Simulador de Clientes",
+      "ENV_MAPPING": {
+        "GENERAL_API_URL": "{SIM_ALB_URL}",
+        "AUTO_START": "true",
+        "RATE": "50"
+      },
+      "DESIRED_COUNT": 0,
+      "DEFAULT_CMD": null
+    },
+    "sim_restaurante": {
+      "REPO_NAME": "dijkfood-sim-restaurante",
+      "TASK_FAMILY": "dijkfood-sim-restaurante-task",
+      "CONTAINER_NAME": "sim-restaurante",
+      "CONTAINER_PORT": 8006,
+      "DOCKERFILE": "simulador_restaurante/Dockerfile",
+      "LOG_STREAM_PREFIX": "sim-restaurante",
+      "TYPE": "service",
+      "SERVICE_NAME": "dijkfood-sim-restaurante-svc",
+      "TG_NAME": "df-sim-tg-restaurante",
+      "HEALTH_CHECK_PATH": "/health",
+      "ALB_PRIORITY": 10,
+      "ALB_PATH_PATTERNS": [
+        "/simulador/restaurante*"
+      ],
+      "DESCRIPTION": "Simulador de Restaurante",
+      "ENV_MAPPING": {
+        "GENERAL_API_URL": "{SIM_ALB_URL}"
+      },
+      "DESIRED_COUNT": 1,
+      "DEFAULT_CMD": null
+    },
+    "sim_entregadores": {
+      "REPO_NAME": "dijkfood-sim-entregadores",
+      "TASK_FAMILY": "dijkfood-sim-entregadores-task",
+      "CONTAINER_NAME": "sim-entregadores",
+      "CONTAINER_PORT": 8007,
+      "DOCKERFILE": "simulador_entregadores/Dockerfile",
+      "LOG_STREAM_PREFIX": "sim-entregadores",
+      "TYPE": "service",
+      "SERVICE_NAME": "dijkfood-sim-entregadores-svc",
+      "TG_NAME": "df-sim-tg-entregadores",
+      "HEALTH_CHECK_PATH": "/health",
+      "ALB_PRIORITY": 20,
+      "ALB_PATH_PATTERNS": [
+        "/simulador/entregador*"
+      ],
+      "DESCRIPTION": "Simulador de Entregadores",
+      "ENV_MAPPING": {
+        "GENERAL_API_URL": "{SIM_ALB_URL}"
+      },
+      "DESIRED_COUNT": 1,
+      "DEFAULT_CMD": null
+    },
+    "sim_completo": {
+      "REPO_NAME": "dijkfood-sim-completo",
+      "TASK_FAMILY": "dijkfood-sim-completo-task",
+      "CONTAINER_NAME": "sim-completo",
+      "DOCKERFILE": "simulador/Dockerfile",
+      "LOG_STREAM_PREFIX": "sim-completo",
+      "TYPE": "task",
+      "DESCRIPTION": "Simulador Completo (Populando Banco)",
+      "ENV_MAPPING": {
+        "CADASTRO_URL": "{API_URL}",
+        "PEDIDOS_URL": "{API_URL}",
+        "ROTAS_URL": "{API_URL}"
+      },
+      "DEFAULT_CMD": [
+        "python",
+        "-m",
+        "simulador.main"
+      ]
+    }
+  }
+}

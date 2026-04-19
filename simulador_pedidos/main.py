@@ -14,6 +14,10 @@ GENERAL_API_URL = os.getenv(
     "GENERAL_API_URL", "http://general-api:8000"
 ).rstrip("/")
 
+# Auto-start: quando deployado no ECS, inicia automaticamente com rate do env var
+AUTO_START = os.getenv("AUTO_START", "false").lower() == "true"
+DEFAULT_RATE = float(os.getenv("RATE", "50"))
+
 
 class SimuladorState:
     def __init__(self):
@@ -29,7 +33,15 @@ sim_state = SimuladorState()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     sim_state.http_client = httpx.AsyncClient(timeout=30.0)
+    if AUTO_START:
+        sim_state.is_running = True
+        sim_state.rate = DEFAULT_RATE
+        sim_state.task = asyncio.create_task(_simular_loop())
+        print(f"[Simulador] Auto-start ativado: rate={DEFAULT_RATE} pedidos/min")
     yield
+    sim_state.is_running = False
+    if sim_state.task:
+        sim_state.task.cancel()
     await sim_state.http_client.aclose()
 
 
@@ -179,6 +191,11 @@ async def status_simulador():
         "rate": sim_state.rate,
         "target_api": GENERAL_API_URL,
     }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":

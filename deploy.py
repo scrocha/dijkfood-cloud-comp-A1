@@ -1,11 +1,11 @@
 import boto3
 from botocore.exceptions import ClientError
 import time
+import os
 import psycopg2
 import subprocess
 import json
 import base64
-import json
 import hashlib
 from pathlib import Path
 
@@ -660,8 +660,18 @@ def main():
         print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health") 
         print("=" * 60)
         
+        # Busca dados de rede para salvar no output (usado pelo deploy de simuladores)
+        vpcs_out = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
+        vpc_id_out = vpcs_out['Vpcs'][0]['VpcId']
+        subnets_out = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id_out]}])
+        subnet_ids_out = [s['SubnetId'] for s in subnets_out['Subnets'][:2]]
+
         deploy_data = {
-            "API_URL": f"http://{alb_dns}"
+            "API_URL": f"http://{alb_dns}",
+            "ALB_DNS": alb_dns,
+            "SG_ID": sg_id,
+            "VPC_ID": vpc_id_out,
+            "SUBNET_IDS": subnet_ids_out
         }
         
         with open(OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:

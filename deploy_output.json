@@ -1,3 +1,10 @@
 {
-    "API_URL": "http://dijkfood-alb-225800751.us-east-1.elb.amazonaws.com"
+    "API_URL": "http://dijkfood-alb-1896193867.us-east-1.elb.amazonaws.com",
+    "ALB_DNS": "dijkfood-alb-1896193867.us-east-1.elb.amazonaws.com",
+    "SG_ID": "sg-0a25c57349e5137a2",
+    "VPC_ID": "vpc-0aa3844d7544fe97b",
+    "SUBNET_IDS": [
+        "subnet-082dfb4ab326e369e",
+        "subnet-0cf07773ff093e5f2"
+    ]
 }
