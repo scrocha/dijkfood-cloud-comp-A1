@@ -212,8 +212,11 @@ class OrderRepository:
                 "delivered_time": status_times.get('DELIVERED', fallback)
             }
 
-            # URL do serviço de banco de dados conforme docker-compose
-            db_url = "http://database-service:8000/cadastro/pedidos"
+            # URL do serviço de cadastro (PostgreSQL)
+            # - Local (docker-compose): http://database-service:8000
+            # - AWS (ALB): http://<alb-dns>
+            cadastro_base = os.getenv("CADASTRO_SERVICE_URL", "http://database-service:8000").rstrip("/")
+            db_url = f"{cadastro_base}/cadastro/pedidos"
             
             with httpx.Client() as client:
                 resp = client.post(db_url, json=payload, timeout=5.0)
