@@ -12,9 +12,9 @@ fake = Faker('pt_BR')
 
 COORDENADAS = None
 
-NUM_USUARIOS = 500
-NUM_ENTREGADORES = 1500
-NUM_RESTAURANTES = 50
+NUM_USUARIOS = int(os.environ.get("SEED_USERS", "500"))
+NUM_ENTREGADORES = int(os.environ.get("SEED_DRIVERS", "200"))
+NUM_RESTAURANTES = int(os.environ.get("SEED_RESTAURANTS", "20"))
 
 json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
 
@@ -81,20 +81,72 @@ def gerar_coordenadas_validas_sp(quantidade):
     print("Baixando fronteiras de São Paulo...")
     sp_gdf = ox.geocode_to_gdf("São Paulo, São Paulo, Brazil")
 
-    print(f"Gerando {quantidade} pontos aleatórios...")
-    amostra = sp_gdf.geometry.sample_points(quantidade)
-    multiponto = amostra.iloc[0]
-    coordenadas = [(ponto.y, ponto.x) for ponto in multiponto.geoms]
+    print(f"Gerando {quantidade} pontos estritamente dentro da área suportada pelas Rotas...")
     
-    print(f"{quantidade} coordenadas de SP geradas.")
+    coordenadas = []
+    # Multiplicador alto para garantir que acharemos o suficiente devido à exclusão da zona sul (Parelheiros)
+    amostra = sp_gdf.geometry.sample_points(quantidade * 3)
+    multiponto = amostra.iloc[0]
+    
+    for ponto in multiponto.geoms:
+        lat, lon = ponto.y, ponto.x
+        # Limites cravados do target group API Rotas:
+        if (-23.9857223 <= lat <= -23.3590754) and (-46.8253578 <= lon <= -46.3653906):
+            coordenadas.append((lat, lon))
+            if len(coordenadas) == quantidade:
+                break
+                
+    while len(coordenadas) < quantidade:
+        coordenadas.append(coordenadas[0] if coordenadas else (-23.5505, -46.6333))
+
+    print(f"{quantidade} coordenadas válidas de SP selecionadas.")
     return coordenadas
 
-async def send_batch(client, endpoint, payload):
-    try:
-        resp = await client.post(f"{API_URL}{endpoint}", json=payload, timeout=60.0)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"Erro ao enviar para {endpoint}: {e}")
+async def esperar_api_pronta(client, url, max_retries=30, delay=10):
+    print(f"Aguardando a API ({url}) ficar completamente pronta no Target Group...")
+    # Fase 1: espera /cadastro/health responder 200
+    for i in range(max_retries):
+        try:
+            resp = await client.get(f"{url}/cadastro/health", timeout=10.0)
+            if resp.status_code == 200:
+                print("Health OK! Testando endpoint de dados...")
+                break
+        except Exception:
+            pass
+        print(f"API ainda não responde (Tentativa {i+1}/{max_retries}). Aguardando {delay}s...")
+        await asyncio.sleep(delay)
+    else:
+        print("Aviso: Limite de tempo esgotado aguardando API. Tentando prosseguir mesmo assim.")
+        return False
+
+    # Fase 2: espera um endpoint real funcionar (502 significa ALB ainda roteando)
+    for i in range(15):
+        try:
+            resp = await client.get(f"{url}/cadastro/restaurantes", timeout=15.0)
+            if resp.status_code < 500:
+                print("A API está online e pronta para receber as requisições!")
+                return True
+        except Exception:
+            pass
+        print(f"Endpoint de dados ainda com 502 (Tentativa {i+1}/15). Aguardando 5s...")
+        await asyncio.sleep(5)
+
+    print("Aviso: Endpoints de dados não responderam. Tentando seed mesmo assim.")
+    return False
+
+async def send_batch(client, endpoint, payload, retries=5):
+    url = f"{API_URL}{endpoint}"
+    for i in range(retries):
+        try:
+            resp = await client.post(url, json=payload, timeout=60.0)
+            resp.raise_for_status()
+            return
+        except Exception as e:
+            if i < retries - 1:
+                print(f"Aviso: Erro ao enviar para {endpoint}: {e}. Retentando em 5s (Tentativa {i+1})...")
+                await asyncio.sleep(5)
+            else:
+                print(f"Erro definitivo ao enviar para {endpoint} após {retries} tentativas: {e}")
 
 async def seed_usuarios(client, total):
     print(f"Iniciando carga de {total} usuários...")
@@ -163,7 +215,19 @@ async def seed_entregadores(client, total):
                 "endereco_longitude": lon
             })
 
+        # Carga PostgreSQL (API Cadastro)
         await send_batch(client, "/cadastro/entregadores/batch", batch_data)
+        
+        # Inicializa o 'status' LIVRE do entregador no DynamoDB (API Pedidos/Orquestrador)
+        dynamo_payload = [
+            {
+                "driver_id": item["entregador_id"],
+                "lat": item["endereco_latitude"],
+                "lng": item["endereco_longitude"],
+            }
+            for item in batch_data
+        ]
+        await send_batch(client, "/pedidos/drivers/batch-location", dynamo_payload)
         
     print(f"Carga de entregadores finalizada. {total} entregadores inseridos.")
 
@@ -199,6 +263,7 @@ async def run_seed():
     COORDENADAS = iter(gerar_coordenadas_validas_sp(NUM_USUARIOS + NUM_ENTREGADORES + NUM_RESTAURANTES))
     
     async with httpx.AsyncClient() as client:
+        await esperar_api_pronta(client, API_URL)
         rest_ids, cozinhas = await seed_restaurantes(client, NUM_RESTAURANTES)
         await seed_usuarios(client, NUM_USUARIOS)
         await seed_entregadores(client, NUM_ENTREGADORES)

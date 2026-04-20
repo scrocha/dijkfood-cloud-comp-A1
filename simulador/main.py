@@ -36,7 +36,8 @@ async def main():
         await asyncio.sleep(config.startup_wait_s)
         print()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    limits = httpx.Limits(max_connections=1000, max_keepalive_connections=500)
+    async with httpx.AsyncClient(timeout=60.0, limits=limits) as client:
         print("--- FASE DE POPULAÇÃO ---")
         pop = await populate(client, config)
         print(

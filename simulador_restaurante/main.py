@@ -18,27 +18,34 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DijkFood - Simulador de Restaurante", lifespan=lifespan)
 
-async def _processar_preparo(order_id: str, restaurant_id: str):
-    """Simula o tempo de cozinha e notifica a API Geral"""
-    # Tempo randômico entre 10 e 15 segundos
-    tempo_preparo = random.randint(10, 15)
-    print(f"[Cozinha] Restaurante {restaurant_id} iniciando pedido {order_id}. Tempo: {tempo_preparo}s")
-    
+async def _processar_preparo(
+    order_id: str,
+    restaurant_id: str,
+    driver_id: str | None,
+    route_to_client: list | None,
+):
+    """Simula o tempo de cozinha e notifica a API Geral com todos os dados
+    necessários para o próximo passo (stateless — o gateway não guarda nada)."""
+    tempo_preparo = random.randint(1, 3)
+    print(f"[Cozinha] Restaurante {restaurant_id} preparando pedido {order_id}. Tempo: {tempo_preparo}s")
+
     await asyncio.sleep(tempo_preparo)
-    
-    # Notifica que está pronto
+
+    # Notifica que está pronto — ecoa driver_id e route_to_client
     client: httpx.AsyncClient = app.state.http
     try:
         webhook_payload = {
             "order_id": order_id,
-            "restaurant_id": restaurant_id
+            "restaurant_id": restaurant_id,
+            "driver_id": driver_id,
+            "route_to_client": route_to_client,
         }
         resp = await client.post(
             f"{GENERAL_API_URL}/webhook/restaurant-ready",
-            json=webhook_payload
+            json=webhook_payload,
         )
         if resp.status_code >= 400:
-            print(f"[Cozinha] Erro ao enviar webhook ({resp.status_code}): {resp.text}")
+            print(f"[Cozinha] Erro webhook ({resp.status_code}): {resp.text}")
         else:
             print(f"[Cozinha] Pedido {order_id} PRONTO e notificado!")
     except Exception as e:
@@ -47,7 +54,13 @@ async def _processar_preparo(order_id: str, restaurant_id: str):
 @app.post("/simulador/restaurante/prepare")
 async def prepare_order(req: PrepareOrderRequest, background_tasks: BackgroundTasks):
     """Endpoint passivo chamado pela API Geral para iniciar o preparo"""
-    background_tasks.add_task(_processar_preparo, req.order_id, req.restaurant_id)
+    background_tasks.add_task(
+        _processar_preparo,
+        req.order_id,
+        req.restaurant_id,
+        req.driver_id,
+        req.route_to_client,
+    )
     return {"status": "preparing", "order_id": req.order_id}
 
 @app.get("/health")

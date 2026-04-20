@@ -25,9 +25,9 @@ from faker import Faker
 fake = Faker("pt_BR")
 
 CADASTRO_URL = os.environ.get("CADASTRO_URL", "http://localhost:8002").rstrip("/")
-SEED_USERS = int(os.environ.get("SEED_USERS", "20"))
-SEED_RESTAURANTS = int(os.environ.get("SEED_RESTAURANTS", "8"))
-SEED_DRIVERS = int(os.environ.get("SEED_DRIVERS", "24"))
+SEED_USERS = int(os.environ.get("SEED_USERS", "500"))
+SEED_RESTAURANTS = int(os.environ.get("SEED_RESTAURANTS", "20"))
+SEED_DRIVERS = int(os.environ.get("SEED_DRIVERS", "200"))
 SEED_MAX_WAIT_S = int(os.environ.get("SEED_MAX_WAIT_S", "120"))
 SEED_WAIT_INTERVAL_S = float(os.environ.get("SEED_WAIT_INTERVAL_S", "2"))
 

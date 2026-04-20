@@ -16,5 +16,7 @@ dependencies = [
     "pydantic[email]>=2.12.5",
     "rustworkx>=0.17.1",
     "scipy>=1.17.1",
+    "streamlit>=1.33.0",
+    "pandas>=2.2.1",
     "uvicorn>=0.42.0",
 ]

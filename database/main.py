@@ -5,6 +5,7 @@ from typing import List
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from database.models import Entregador, Pedido, Produto, Restaurante, Usuario
 
@@ -267,11 +268,14 @@ async def obter_entregador(entregador_id: str, conn = Depends(get_db_connection)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class LocationUpdateBody(BaseModel):
+    lat: float
+    lng: float
+
 @app.patch("/cadastro/entregadores/{entregador_id}/localizacao")
 async def atualizar_localizacao_entregador(
     entregador_id: str,
-    lat: float,
-    lng: float,
+    body: LocationUpdateBody,
     conn=Depends(get_db_connection),
 ):
     """Atualiza a localização geográfica de um entregador"""
@@ -282,7 +286,7 @@ async def atualizar_localizacao_entregador(
         WHERE ENTREGADOR_ID = $3
     """
     try:
-        status = await conn.execute(query, lat, lng, entregador_id)
+        status = await conn.execute(query, body.lat, body.lng, entregador_id)
         if status == "UPDATE 0":
             raise HTTPException(status_code=404, detail="Entregador não encontrado")
         return {"mensagem": "Localização atualizada com sucesso!"}
@@ -290,6 +294,7 @@ async def atualizar_localizacao_entregador(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ==================================================
