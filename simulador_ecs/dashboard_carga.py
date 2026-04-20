@@ -8,6 +8,7 @@ Permite:
   - Disparar tasks batch opcionais (sim_completo, carga_unitario)
   - Visualizar logs CloudWatch em tempo real, separados por simulador
   - Verificar health, métricas e configuração de rede do cluster
+  - Monitorar P95 latency em tempo real
 
 Uso:
     uv run streamlit run simulador_ecs/dashboard_carga.py
@@ -17,6 +18,7 @@ import streamlit as st
 import boto3
 import json
 import time
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from botocore.exceptions import ClientError
@@ -274,8 +276,6 @@ def stop_all_tasks():
 def fetch_logs(stream_prefix: str, limit_streams: int = 3, limit_events: int = 30):
     """Busca logs do CloudWatch filtrados por stream prefix."""
     try:
-        # A API do CloudWatch não permite orderBy='LastEventTime' com logStreamNamePrefix.
-        # Por isso buscamos os streams e ordenamos localmente.
         response = logs_client.describe_log_streams(
             logGroupName=LOG_GROUP_NAME,
             logStreamNamePrefix=stream_prefix
@@ -327,45 +327,90 @@ def check_cluster_exists():
 
 def get_dynamo_counts(table_name="DijkfoodOrders"):
     """
-    Usa SCAN com Filtros para garantir que os dados sejam contados corretamente,
-    independente da integridade dos índices GSI.
+    Usa GSI Query otimizada (não Scan) para contar pedidos por status.
     """
     try:
-        dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
-        table = dynamodb.Table(table_name)
-        
-        # Scan completo para pegar tudo de uma vez
-        response = table.scan()
-        items = response.get('Items', [])
-        
-        # Continua o scan se houver paginação
-        while 'LastEvaluatedKey' in response:
-            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
-            items.extend(response.get('Items', []))
+        dynamodb = boto3.client('dynamodb', region_name=AWS_REGION)
+
+        def count_gsi2pk(gsi2pk_value):
+            response = dynamodb.query(
+                TableName=table_name,
+                IndexName='StatusIndex',
+                Select='COUNT',
+                KeyConditionExpression='GSI2PK = :gsi',
+                ExpressionAttributeValues={':gsi': {'S': gsi2pk_value}}
+            )
+            total = response.get('Count', 0)
+            while 'LastEvaluatedKey' in response:
+                response = dynamodb.query(
+                    TableName=table_name,
+                    IndexName='StatusIndex',
+                    Select='COUNT',
+                    KeyConditionExpression='GSI2PK = :gsi',
+                    ExpressionAttributeValues={':gsi': {'S': gsi2pk_value}},
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                total += response.get('Count', 0)
+            return total
 
         counts = {
-            "CONFIRMED": 0, "PREPARING": 0, "READY_FOR_PICKUP": 0, 
-            "PICKED_UP": 0, "IN_TRANSIT": 0, "DELIVERED": 0
+            "CONFIRMED": count_gsi2pk("STATUS#CONFIRMED"),
+            "PREPARING": count_gsi2pk("STATUS#PREPARING"),
+            "READY_FOR_PICKUP": count_gsi2pk("STATUS#READY_FOR_PICKUP"),
+            "PICKED_UP": count_gsi2pk("STATUS#PICKED_UP"),
+            "IN_TRANSIT": count_gsi2pk("STATUS#IN_TRANSIT"),
+            "DELIVERED": count_gsi2pk("STATUS#DELIVERED"),
         }
-        driver_counts = {"LIVRE": 0, "EM_ENTREGA": 0}
+        driver_counts = {
+            "LIVRE": count_gsi2pk("DRIVER_STATUS#LIVRE"),
+            "EM_ENTREGA": count_gsi2pk("DRIVER_STATUS#EM_ENTREGA")
+        }
 
-        for item in items:
-            pk = item.get('PK', '')
-            status = item.get('status', item.get('Status', ''))
-            
-            if pk.startswith('ORDER#'):
-                if status in counts:
-                    counts[status] += 1
-            elif pk.startswith('DRIVER#'):
-                if status in driver_counts:
-                    driver_counts[status] += 1
-                elif not status: # Fallback para motorista sem status definido
-                    driver_counts["LIVRE"] += 1
-                    
         return counts, driver_counts
     except Exception as e:
+        print(f"Erro no dynamodb query: {e}")
         return None, None
 
+
+def extract_p95_from_logs():
+    """Extrai a última métrica P95 dos logs do simulador de clientes."""
+    try:
+        sim_config = SIMULATORS.get("sim_pedidos", {})
+        prefix = sim_config.get("LOG_STREAM_PREFIX", "sim-clientes")
+        logs = fetch_logs(prefix, limit_streams=2, limit_events=50)
+        if not logs:
+            return None
+
+        # Percorre os eventos mais recentes procurando [METRICS]
+        for log_entry in logs:
+            events = log_entry.get('events', [])
+            for event in reversed(events):
+                msg = event.get('message', '')
+                if '[METRICS]' in msg:
+                    # Parse: [METRICS] P95=123ms Avg=45ms | Rate=10/s | Sent=100 Err=2
+                    result = {}
+                    p95_match = re.search(r'P95=(\d+)', msg)
+                    avg_match = re.search(r'Avg=(\d+)', msg)
+                    rate_match = re.search(r'Rate=(\d+)', msg)
+                    sent_match = re.search(r'Sent=(\d+)', msg)
+                    err_match = re.search(r'Err=(\d+)', msg)
+
+                    if p95_match:
+                        result['p95'] = int(p95_match.group(1))
+                    if avg_match:
+                        result['avg'] = int(avg_match.group(1))
+                    if rate_match:
+                        result['rate'] = int(rate_match.group(1))
+                    if sent_match:
+                        result['sent'] = int(sent_match.group(1))
+                    if err_match:
+                        result['errors'] = int(err_match.group(1))
+
+                    if result:
+                        return result
+        return None
+    except Exception:
+        return None
 
 
 # =========================================================================
@@ -399,6 +444,33 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.1);
         border-radius: 10px;
         padding: 1rem;
+    }
+    .p95-ok {
+        background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
+        color: #000;
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+    .p95-warn {
+        background: linear-gradient(135deg, #ff6d00 0%, #ffd740 100%);
+        color: #000;
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+    .p95-bad {
+        background: linear-gradient(135deg, #d50000 0%, #ff5252 100%);
+        color: #fff;
+        border-radius: 12px;
+        padding: 1.5rem;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: 700;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -469,6 +541,109 @@ tab_control, tab_logs, tab_status = st.tabs(["🎮 Controle", "📋 Logs", "📊
 # ─── ABA CONTROLE ────────────────────────────────────────────────────────
 with tab_control:
 
+    # ── P95 LATENCY BANNER ──
+    st.markdown("### 📊 Métricas de Performance em Tempo Real")
+
+    metrics = extract_p95_from_logs()
+    if metrics:
+        p95_val = metrics.get('p95', 0)
+        avg_val = metrics.get('avg', 0)
+        rate_val = metrics.get('rate', 0)
+        sent_val = metrics.get('sent', 0)
+        err_val = metrics.get('errors', 0)
+
+        # P95 Banner colorido
+        if p95_val <= 500:
+            css_class = "p95-ok"
+            emoji = "✅"
+        elif p95_val <= 1000:
+            css_class = "p95-warn"
+            emoji = "⚠️"
+        else:
+            css_class = "p95-bad"
+            emoji = "❌"
+
+        st.markdown(
+            f'<div class="{css_class}">'
+            f'{emoji} P95 Latency: <strong>{p95_val}ms</strong> '
+            f'(meta: ≤500ms)'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown("")  # Spacer
+
+        # Métricas em colunas
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("P95 Latência", f"{p95_val}ms", delta=f"{'OK' if p95_val <= 500 else 'ALTO'}")
+        m2.metric("Avg Latência", f"{avg_val}ms")
+        m3.metric("Rate Config.", f"{rate_val}/s")
+        m4.metric("Total Enviados", f"{sent_val:,}")
+        m5.metric("Total Erros", f"{err_val:,}")
+    else:
+        st.info("📊 Métricas P95 aparecerão aqui quando o simulador de clientes estiver rodando.")
+
+    st.markdown("---")
+
+    # ── CONTROLE RÁPIDO DE RATE ──
+    st.markdown("### ⚡ Controle Rápido de Carga")
+    st.caption("Configure a taxa de pedidos por segundo. O professor solicitou testes com 10, 50 e 200 ped/s.")
+
+    rate_cols = st.columns(4)
+    rate_presets = [
+        ("🟢 10/s", 10),
+        ("🟡 50/s", 50),
+        ("🔴 200/s", 200),
+    ]
+
+    sim_pedidos_config = SIMULATORS.get("sim_pedidos", {})
+
+    for idx, (label, rate_val) in enumerate(rate_presets):
+        with rate_cols[idx]:
+            if st.button(label, key=f"quick_rate_{rate_val}", use_container_width=True):
+                with st.spinner(f"Aplicando rate={rate_val}/s..."):
+                    ok = update_service_rate(
+                        sim_pedidos_config['SERVICE_NAME'],
+                        sim_pedidos_config['TASK_FAMILY'],
+                        sim_pedidos_config['CONTAINER_NAME'],
+                        rate_val
+                    )
+                    if ok:
+                        # Garante que o serviço está rodando com pelo menos 1 instância
+                        svc = get_service_info(sim_pedidos_config['SERVICE_NAME'])
+                        if svc and svc['desiredCount'] == 0:
+                            scale_service(
+                                sim_pedidos_config['SERVICE_NAME'],
+                                sim_pedidos_config['TASK_FAMILY'],
+                                1
+                            )
+                        st.success(f"✅ Rate atualizado para {rate_val}/s! Novo deploy em andamento.")
+                        time.sleep(2)
+                        st.rerun()
+
+    with rate_cols[3]:
+        custom_rate = st.number_input("Custom", min_value=1, max_value=500, value=10, key="custom_rate")
+        if st.button("Aplicar", key="apply_custom_rate", use_container_width=True):
+            with st.spinner(f"Aplicando rate={custom_rate}/s..."):
+                ok = update_service_rate(
+                    sim_pedidos_config['SERVICE_NAME'],
+                    sim_pedidos_config['TASK_FAMILY'],
+                    sim_pedidos_config['CONTAINER_NAME'],
+                    custom_rate
+                )
+                if ok:
+                    svc = get_service_info(sim_pedidos_config['SERVICE_NAME'])
+                    if svc and svc['desiredCount'] == 0:
+                        scale_service(
+                            sim_pedidos_config['SERVICE_NAME'],
+                            sim_pedidos_config['TASK_FAMILY'],
+                            1
+                        )
+                    st.success(f"✅ Rate atualizado para {custom_rate}/s!")
+                    time.sleep(2)
+                    st.rerun()
+
+    st.markdown("---")
+
     # Listar tasks ativas
     running_tasks = list_running_tasks()
     if running_tasks:
@@ -513,34 +688,14 @@ with tab_control:
                     key=f"desired_{sim_key}"
                 )
 
-                # Para sim_pedidos: controle de rate
-                rate = None
-                if sim_key == "sim_pedidos":
-                    rate = st.slider(
-                        "Rate (pedidos/min)",
-                        min_value=1, max_value=200, value=50, step=5,
-                        key=f"rate_{sim_key}",
-                        help="Pedidos por minuto por instância. Atualiza via redeploy."
-                    )
-
                 submitted = st.form_submit_button(
-                    "📐 Aplicar",
+                    "📐 Aplicar Escala",
                     type="primary",
                     use_container_width=True
                 )
 
                 if submitted:
                     with st.spinner("Aplicando mudanças..."):
-                        # Se mudou o rate do sim_pedidos, atualizar task definition
-                        if sim_key == "sim_pedidos" and rate is not None:
-                            update_service_rate(
-                                service_name,
-                                sim_config['TASK_FAMILY'],
-                                sim_config['CONTAINER_NAME'],
-                                rate
-                            )
-
-                        # Escalar service
                         ok = scale_service(
                             service_name,
                             sim_config['TASK_FAMILY'],
@@ -573,20 +728,6 @@ with tab_control:
                     extra_env = []
                     cmd_override = None
 
-                    if sim_key == "sim_completo":
-                        duration = st.slider(
-                            "Duração (s)", 60, 600, 300, 30,
-                            key=f"duration_{sim_key}"
-                        )
-                        workers = st.slider(
-                            "Workers", 1, 20, 5, 1,
-                            key=f"workers_{sim_key}"
-                        )
-                        extra_env = [
-                            {"name": "RUN_DURATION_S", "value": str(duration)},
-                            {"name": "NUM_WORKERS", "value": str(workers)},
-                        ]
-
                     submitted = st.form_submit_button(
                         f"🚀 Disparar",
                         type="primary",
@@ -615,7 +756,7 @@ with tab_logs:
     st.markdown("### 📋 Monitoramento e Logs")
     st.caption(f"Acompanhe o estado do banco e os logs dos containers (CloudWatch: `{LOG_GROUP_NAME}`)")
 
-    log_tab_names = ["📈 Tempo Real (DynamoDB)"]
+    log_tab_names = ["📈 Ciclo de Vida (DynamoDB)"]
     for sim_config in SIMULATORS.values():
         name = sim_config['DESCRIPTION'].split('(')[0].split('—')[0].strip()
         log_tab_names.append(name)
@@ -624,27 +765,56 @@ with tab_logs:
 
     # Nova Aba de Tempo Real (DynamoDB)
     with log_tabs[0]:
-        st.markdown("### 🟢 Controle Ativo - DynamoDB Scan")
-        
+        st.markdown("### 🟢 Ciclo de Vida dos Pedidos")
+
         col_auto, col_btn = st.columns([1, 4])
         with col_auto:
-            auto_refresh = st.checkbox("Auto-Atualizar (2s)", value=False, help="Atualiza a contagem quase em tempo real")
+            auto_refresh = st.checkbox("Auto-Atualizar (3s)", value=False, help="Atualiza a contagem quase em tempo real")
         with col_btn:
             if st.button("🔄 Atualizar Contagens", key="refresh_dynamo"):
                 pass
-        
+
         counts, drivers = get_dynamo_counts()
 
         if counts is not None:
+            # ── P95 Latência no topo ──
+            st.markdown("#### 🎯 Performance")
+            metrics_here = extract_p95_from_logs()
+            if metrics_here:
+                p95_v = metrics_here.get('p95', 0)
+                if p95_v <= 500:
+                    st.success(f"✅ **P95 Latency: {p95_v}ms** — Dentro do objetivo (≤500ms)")
+                elif p95_v <= 1000:
+                    st.warning(f"⚠️ **P95 Latency: {p95_v}ms** — Acima do objetivo (≤500ms)")
+                else:
+                    st.error(f"❌ **P95 Latency: {p95_v}ms** — Muito acima do objetivo (≤500ms)")
+            else:
+                st.caption("_Aguardando métricas do simulador..._")
+
             st.markdown("#### 📦 Status dos Pedidos")
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            c1.metric("Confirmados", counts["CONFIRMED"])
-            c2.metric("Em Preparo", counts["PREPARING"], help="Cozinha")
-            c3.metric("Prontos", counts["READY_FOR_PICKUP"])
-            c4.metric("Coletados", counts["PICKED_UP"])
-            c5.metric("Em Trânsito", counts["IN_TRANSIT"], help="GPS Ativo")
-            c6.metric("Entregues", counts["DELIVERED"], help="Finalizados")
-            
+
+            # Progresso visual
+            total_orders = sum(counts.values())
+            if total_orders > 0:
+                progress_cols = st.columns(6)
+                labels = ["Confirmados", "Em Preparo", "Prontos", "Coletados", "Em Trânsito", "Entregues"]
+                keys = ["CONFIRMED", "PREPARING", "READY_FOR_PICKUP", "PICKED_UP", "IN_TRANSIT", "DELIVERED"]
+                for pc, lbl, key in zip(progress_cols, labels, keys):
+                    pc.metric(lbl, counts[key])
+
+                # Barra de progresso mostrando o fluxo
+                delivered_pct = counts["DELIVERED"] / total_orders if total_orders > 0 else 0
+                st.progress(delivered_pct, text=f"Progresso: {counts['DELIVERED']}/{total_orders} entregues ({delivered_pct:.0%})")
+
+            else:
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
+                c1.metric("Confirmados", 0)
+                c2.metric("Em Preparo", 0)
+                c3.metric("Prontos", 0)
+                c4.metric("Coletados", 0)
+                c5.metric("Em Trânsito", 0)
+                c6.metric("Entregues", 0)
+
             st.markdown("#### 🏍️ Frota de Entregadores")
             d1, d2, d3 = st.columns(3)
             d1.metric("Livres", drivers["LIVRE"])
@@ -654,7 +824,7 @@ with tab_logs:
             st.warning("Não foi possível acessar a tabela DijkfoodOrders no momento.")
 
         if auto_refresh:
-            time.sleep(2)
+            time.sleep(3)
             st.rerun()
 
     for log_tab, (sim_key, sim_config) in zip(log_tabs[1:], SIMULATORS.items()):
@@ -681,7 +851,7 @@ with tab_logs:
                 all_aggregated_events = []
                 for log_entry in logs_data:
                     all_aggregated_events.extend(log_entry['events'])
-                
+
                 # Ordenar cronologicamente pelo timestamp
                 all_aggregated_events.sort(key=lambda e: e.get('timestamp', 0))
 
@@ -694,7 +864,7 @@ with tab_logs:
                         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                         msg = event.get('message', '')
                         log_text += f"[{dt.strftime('%H:%M:%S')}] {msg}\n"
-                    
+
                     st.code(log_text, language="log")
 
 

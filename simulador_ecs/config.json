@@ -50,7 +50,7 @@
       "ENV_MAPPING": {
         "GENERAL_API_URL": "{SIM_ALB_URL}",
         "AUTO_START": "true",
-        "RATE": "50"
+        "RATE": "10"
       },
       "DESIRED_COUNT": 0,
       "DEFAULT_CMD": null
@@ -98,25 +98,6 @@
       },
       "DESIRED_COUNT": 1,
       "DEFAULT_CMD": null
-    },
-    "sim_completo": {
-      "REPO_NAME": "dijkfood-sim-completo",
-      "TASK_FAMILY": "dijkfood-sim-completo-task",
-      "CONTAINER_NAME": "sim-completo",
-      "DOCKERFILE": "simulador/Dockerfile",
-      "LOG_STREAM_PREFIX": "sim-completo",
-      "TYPE": "task",
-      "DESCRIPTION": "Simulador Completo (Populando Banco)",
-      "ENV_MAPPING": {
-        "CADASTRO_URL": "{API_URL}",
-        "PEDIDOS_URL": "{API_URL}",
-        "ROTAS_URL": "{API_URL}"
-      },
-      "DEFAULT_CMD": [
-        "python",
-        "-m",
-        "simulador.main"
-      ]
     }
   }
 }

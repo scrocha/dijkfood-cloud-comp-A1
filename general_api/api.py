@@ -16,12 +16,23 @@ from general_api.models import (
     CheckoutRequest,
     CourierCreate,
     CourierLocationUpdate,
-    CourierPickedUpWebhook,
     DeliveredWebhook,
     RestaurantCreate,
     RestaurantReadyWebhook,
     UserCreate,
 )
+
+
+# ─── Modelo para novo webhook ────────────────────────────────────────────
+from pydantic import BaseModel, Field
+
+
+class CourierAtRestaurantWebhook(BaseModel):
+    order_id: str = Field(..., min_length=1)
+    courier_id: str = Field(..., min_length=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 
 
 def _require_http_base_url(env_name: str, value: Optional[str]) -> str:
@@ -63,46 +74,164 @@ ROUTE_SERVICE_URL = os.getenv(
 SIM_RESTAURANT_URL = os.getenv("SIM_RESTAURANT_URL")
 SIM_COURIER_URL = os.getenv("SIM_COURIER_URL")
 
-TIMEOUT_DB_S = float(os.getenv("TIMEOUT_DB_S", "5"))
-TIMEOUT_ORDER_S = float(os.getenv("TIMEOUT_ORDER_S", "5"))
-TIMEOUT_ROUTE_S = float(os.getenv("TIMEOUT_ROUTE_S", "30"))
-TIMEOUT_SIM_S = float(os.getenv("TIMEOUT_SIM_S", "5"))
+TIMEOUT_DB_S = float(os.getenv("TIMEOUT_DB_S", "30"))
+TIMEOUT_ORDER_S = float(os.getenv("TIMEOUT_ORDER_S", "15"))
+TIMEOUT_ROUTE_S = float(os.getenv("TIMEOUT_ROUTE_S", "60"))
+TIMEOUT_SIM_S = float(os.getenv("TIMEOUT_SIM_S", "15"))
 
 ARRIVAL_THRESHOLD_M = float(os.getenv("ARRIVAL_THRESHOLD_M", "10"))
 
 
-class _OrderState:
-    def __init__(
-        self,
-        order_id: str,
-        courier_id: str,
-        restaurant: dict[str, float],
-        customer: dict[str, float],
-        route_to_restaurant: list[dict[str, float]],
-        route_to_client: list[dict[str, float]],
-    ):
-        self.order_id = order_id
-        self.courier_id = courier_id
-        self.restaurant = restaurant
-        self.customer = customer
-        self.route_to_restaurant = route_to_restaurant
-        self.route_to_client = route_to_client
 
-        self.restaurant_ready = False
-        self.courier_arrived = False
-        self.order_ready_sent = False
+async def _drain_confirmed_orders(app: FastAPI):
+    """Background loop: pega pedidos CONFIRMED órfãos e processa-os.
+    Isso garante que pedidos cujo checkout falhou no meio sejam drenados."""
+    await asyncio.sleep(15)  # espera serviços subirem
+    while True:
+        try:
+            client: httpx.AsyncClient = app.state.http
+            sim_restaurant_url = SIM_RESTAURANT_URL.rstrip("/") if SIM_RESTAURANT_URL else None
+            sim_courier_url = SIM_COURIER_URL.rstrip("/") if SIM_COURIER_URL else None
+            if not sim_restaurant_url or not sim_courier_url:
+                await asyncio.sleep(10)
+                continue
 
+            # 1. Busca pedidos CONFIRMED (órfãos)
+            try:
+                confirmed = await _request_json(
+                    client, "GET",
+                    f"{ORDER_SERVICE_URL}/pedidos/orders/status/CONFIRMED",
+                    timeout_s=10,
+                )
+            except Exception:
+                await asyncio.sleep(5)
+                continue
 
-_state_lock = asyncio.Lock()
-_order_state: dict[str, _OrderState] = {}
+            if not isinstance(confirmed, list) or not confirmed:
+                await asyncio.sleep(5)
+                continue
+
+            # Limita a 10 por ciclo para não sobrecarregar
+            batch = confirmed[:10]
+            print(f"[Drainer] {len(confirmed)} pedidos CONFIRMED encontrados, processando {len(batch)}...")
+
+            for order in batch:
+                order_id = order.get("order_id")
+                customer_id = order.get("customer_id")
+                restaurant_id = order.get("restaurant_id")
+                if not order_id or not restaurant_id:
+                    continue
+
+                try:
+                    # 2. Pegar dados do restaurante e cliente
+                    rest_data = await _request_json(
+                        client, "GET",
+                        f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/{restaurant_id}",
+                        timeout_s=10,
+                    )
+                    rest_lat, rest_lon = _coerce_lat_lon(rest_data)
+
+                    user_lat, user_lon = rest_lat + 0.01, rest_lon + 0.01  # fallback
+                    if customer_id:
+                        try:
+                            user_data = await _request_json(
+                                client, "GET",
+                                f"{DATABASE_SERVICE_URL}/cadastro/usuarios/{customer_id}",
+                                timeout_s=10,
+                            )
+                            user_lat, user_lon = _coerce_lat_lon(user_data)
+                        except Exception:
+                            pass
+
+                    # 3. Pegar entregador livre
+                    drivers = await _request_json(
+                        client, "GET",
+                        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free?limit=5",
+                        timeout_s=10,
+                    )
+                    if not isinstance(drivers, list) or not drivers:
+                        continue
+
+                    best_idx, best_dist = 0, float("inf")
+                    for i, d in enumerate(drivers):
+                        try:
+                            dlat, dlon = _coerce_lat_lon(d)
+                            dist = _haversine_m(rest_lat, rest_lon, dlat, dlon)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_idx = i
+                        except Exception:
+                            continue
+
+                    driver = drivers[best_idx]
+                    c_id = _coerce_driver_id(driver)
+                    c_lat, c_lon = _coerce_lat_lon(driver)
+
+                    # 4. Atribuir entregador (PREPARING)
+                    await _request_json(
+                        client, "PATCH",
+                        f"{ORDER_SERVICE_URL}/pedidos/orders/{order_id}/status",
+                        timeout_s=10,
+                        json={"status": "PREPARING", "entregador_id": c_id},
+                    )
+
+                    # 5. Notificar restaurante (com dados stateless)
+                    route_to_client = _interpolate_route(rest_lat, rest_lon, user_lat, user_lon, 5)
+                    route_to_rest = _interpolate_route(c_lat, c_lon, rest_lat, rest_lon, 3)
+
+                    await _request_json(
+                        client, "POST",
+                        f"{sim_restaurant_url}/simulador/restaurante/prepare",
+                        timeout_s=10,
+                        json={
+                            "order_id": order_id,
+                            "restaurant_id": restaurant_id,
+                            "driver_id": c_id,
+                            "route_to_client": route_to_client,
+                        },
+                    )
+
+                    # 6. Enviar entregador ao restaurante
+                    await _request_json(
+                        client, "POST",
+                        f"{sim_courier_url}/simulador/entregador/go-to-restaurant",
+                        timeout_s=10,
+                        json={
+                            "order_id": order_id,
+                            "courier_id": c_id,
+                            "route": route_to_rest,
+                            "restaurant": {"lat": rest_lat, "lon": rest_lon},
+                            "customer": {"lat": user_lat, "lon": user_lon},
+                        },
+                    )
+
+                    print(f"[Drainer] ✅ Pedido {order_id[:8]} → PREPARING (driver {c_id[:8]})")
+
+                except Exception as e:
+                    print(f"[Drainer] ❌ Pedido {order_id[:8]}: {type(e).__name__}: {e}")
+                    continue
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Drainer] Erro no loop: {e}")
+
+        await asyncio.sleep(5)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.http = httpx.AsyncClient(headers={"User-Agent": "general-api"})
+    limits = httpx.Limits(max_connections=200, max_keepalive_connections=50)
+    app.state.http = httpx.AsyncClient(
+        headers={"User-Agent": "general-api"},
+        limits=limits,
+        timeout=30.0,
+    )
+    drain_task = asyncio.create_task(_drain_confirmed_orders(app))
     try:
         yield
     finally:
+        drain_task.cancel()
         await app.state.http.aclose()
 
 
@@ -283,7 +412,7 @@ async def listar_entregadores_livres():
     return await _request_json(
         client,
         "GET",
-        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free?limit=50",
         timeout_s=TIMEOUT_ORDER_S,
     )
 
@@ -461,6 +590,18 @@ async def cadastrar_entregadores_batch(body: list[CourierCreate]):
 
     return {"mensagem": f"{len(body)} Entregadores cadastrados e ativos!"}
 
+def _interpolate_route(
+    lat1: float, lon1: float, lat2: float, lon2: float, num_points: int = 5
+) -> list[dict[str, float]]:
+    """Gera pontos intermediários entre duas coordenadas (rota simplificada)."""
+    return [
+        {
+            "lat": lat1 + (lat2 - lat1) * (i / num_points),
+            "lon": lon1 + (lon2 - lon1) * (i / num_points),
+        }
+        for i in range(num_points + 1)
+    ]
+
 
 @app.post("/checkout", status_code=201)
 async def checkout(body: CheckoutRequest):
@@ -471,7 +612,7 @@ async def checkout(body: CheckoutRequest):
 
     client: httpx.AsyncClient = app.state.http
 
-    # Paralelização das consultas iniciais (Usuário, Restaurante e Entregadores Livres)
+    # 1. Obter Cliente e Restaurante (paralelo)
     user_task = _request_json(
         client,
         "GET",
@@ -484,93 +625,16 @@ async def checkout(body: CheckoutRequest):
         f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/{body.restaurant_id}",
         timeout_s=TIMEOUT_DB_S,
     )
-    drivers_task = _request_json(
-        client,
-        "GET",
-        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free",
-        timeout_s=TIMEOUT_ORDER_S,
-    )
 
-    usuario, restaurante, entregadores = await asyncio.gather(
-        user_task, rest_task, drivers_task
-    )
+    usuario, restaurante = await asyncio.gather(user_task, rest_task)
 
     user_lat, user_lon = _coerce_lat_lon(usuario)
     rest_lat, rest_lon = _coerce_lat_lon(restaurante)
 
-    if not isinstance(entregadores, list):
-        raise HTTPException(
-            status_code=502,
-            detail="Payload inválido de entregadores disponíveis",
-        )
-    if not entregadores:
-        raise HTTPException(status_code=409, detail="Sem entregadores livres")
+    # 2. Gerar rotas simplificadas (sem route-service — 100x mais rápido)
+    rota_final_pontos = _interpolate_route(rest_lat, rest_lon, user_lat, user_lon, 5)
 
-    drivers_norm: list[dict[str, Any]] = []
-    drivers_points: list[dict[str, float]] = []
-    for d in entregadores:
-        if not isinstance(d, dict):
-            continue
-        dlat, dlon = _coerce_lat_lon(d)
-        did = _coerce_driver_id(d)
-        drivers_norm.append({"driver_id": did, "lat": dlat, "lon": dlon})
-        drivers_points.append({"lat": dlat, "lon": dlon})
-
-    if not drivers_norm:
-        raise HTTPException(
-            status_code=502,
-            detail="Lista de entregadores disponíveis sem dados válidos",
-        )
-
-    escolha = await _request_json(
-        client,
-        "POST",
-        f"{ROUTE_SERVICE_URL}/rotas/entregador-mais-proximo",
-        timeout_s=TIMEOUT_ROUTE_S,
-        json={
-            "restaurante": {"lat": rest_lat, "lon": rest_lon},
-            "entregadores": drivers_points,
-        },
-    )
-
-    idx = escolha.get("entregador_idx")
-    if not isinstance(idx, int) or idx < 0 or idx >= len(drivers_norm):
-        raise HTTPException(
-            status_code=502,
-            detail="Resposta inválida do route-service (entregador_idx)",
-        )
-
-    courier_id = drivers_norm[idx]["driver_id"]
-    rota_ao_restaurante = escolha.get("rota_ao_restaurante")
-
-    rota_ao_restaurante_pontos = _rota_para_pontos(rota_ao_restaurante)
-    if not rota_ao_restaurante_pontos:
-        raise HTTPException(
-            status_code=502,
-            detail="Resposta inválida do route-service (rota_ao_restaurante sem percursos)",
-        )
-
-    rota_final = await _request_json(
-        client,
-        "POST",
-        f"{ROUTE_SERVICE_URL}/rotas/rota-entrega",
-        timeout_s=TIMEOUT_ROUTE_S,
-        json={
-            "origem": {"lat": rest_lat, "lon": rest_lon},
-            "destino": {"lat": user_lat, "lon": user_lon},
-        },
-    )
-
-    rota_final_data = (
-        rota_final.get("dados_rota") if isinstance(rota_final, dict) else None
-    )
-    rota_final_pontos = _rota_para_pontos(rota_final_data)
-    if not rota_final_pontos:
-        raise HTTPException(
-            status_code=502,
-            detail="Resposta inválida do route-service (rota final sem percursos)",
-        )
-
+    # 3. Criar pedido no Banco (Status Inicial: CONFIRMED)
     pedido = await _request_json(
         client,
         "POST",
@@ -590,13 +654,91 @@ async def checkout(body: CheckoutRequest):
             status_code=502, detail="order-service não retornou order_id"
         )
 
+    # 4. Reservar Entregador (haversine local, sem route-service)
+    assigned = False
+    courier_id = None
+
+    for attempt in range(5):
+        try:
+            entregadores = await _request_json(
+                client,
+                "GET",
+                f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free?limit=20",
+                timeout_s=TIMEOUT_ORDER_S,
+            )
+
+            if not isinstance(entregadores, list) or not entregadores:
+                await asyncio.sleep(0.3)
+                continue
+
+            # Achar o mais próximo por haversine (instantâneo)
+            best_idx = 0
+            best_dist = float("inf")
+            drivers_norm: list[dict[str, Any]] = []
+            for d in entregadores[:20]:
+                if not isinstance(d, dict):
+                    continue
+                try:
+                    dlat, dlon = _coerce_lat_lon(d)
+                    did = _coerce_driver_id(d)
+                except HTTPException:
+                    continue
+                dist = _haversine_m(rest_lat, rest_lon, dlat, dlon)
+                drivers_norm.append({"driver_id": did, "lat": dlat, "lon": dlon})
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = len(drivers_norm) - 1
+
+            if not drivers_norm:
+                await asyncio.sleep(0.3)
+                continue
+
+            c_id = drivers_norm[best_idx]["driver_id"]
+            c_lat = drivers_norm[best_idx]["lat"]
+            c_lon = drivers_norm[best_idx]["lon"]
+
+            # Lock no banco: PREPARING + atribui entregador
+            await _request_json(
+                client,
+                "PATCH",
+                f"{ORDER_SERVICE_URL}/pedidos/orders/{order_id}/status",
+                timeout_s=TIMEOUT_ORDER_S,
+                json={"status": "PREPARING", "entregador_id": c_id},
+            )
+
+            assigned = True
+            courier_id = c_id
+            break
+
+        except HTTPException as e:
+            if e.status_code in (400, 409):
+                await asyncio.sleep(0.2)
+                continue
+            raise e
+        except ValueError:
+            continue
+
+    if not assigned:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Nenhum entregador disponível", "order_id": order_id},
+        )
+
+    # 5. Notifica Restaurante + Entregador (paralelo, fire-and-forget)
+    rota_ao_restaurante = _interpolate_route(c_lat, c_lon, rest_lat, rest_lon, 3)
+
     async def push_restaurante():
         return await _request_json(
             client,
             "POST",
             f"{sim_restaurant}/simulador/restaurante/prepare",
             timeout_s=TIMEOUT_SIM_S,
-            json={"order_id": order_id, "restaurant_id": body.restaurant_id},
+            json={
+                "order_id": order_id,
+                "restaurant_id": body.restaurant_id,
+                "driver_id": courier_id,
+                "route_to_client": rota_final_pontos,
+            },
         )
 
     async def push_entregador():
@@ -608,7 +750,7 @@ async def checkout(body: CheckoutRequest):
             json={
                 "order_id": order_id,
                 "courier_id": courier_id,
-                "route": rota_ao_restaurante_pontos,
+                "route": rota_ao_restaurante,
                 "restaurant": {"lat": rest_lat, "lon": rest_lon},
                 "customer": {"lat": user_lat, "lon": user_lon},
             },
@@ -622,95 +764,70 @@ async def checkout(body: CheckoutRequest):
             detail={"error": e.detail, "order_id": order_id},
         )
 
-    await _request_json(
-        client,
-        "PATCH",
-        f"{ORDER_SERVICE_URL}/pedidos/orders/{order_id}/status",
-        timeout_s=TIMEOUT_ORDER_S,
-        json={"status": "PREPARING", "entregador_id": courier_id},
-    )
-
-    async with _state_lock:
-        _order_state[order_id] = _OrderState(
-            order_id=order_id,
-            courier_id=courier_id,
-            restaurant={"lat": rest_lat, "lon": rest_lon},
-            customer={"lat": user_lat, "lon": user_lon},
-            route_to_restaurant=rota_ao_restaurante_pontos,
-            route_to_client=rota_final_pontos,
-        )
-
     return {
         "order_id": order_id,
         "courier_id": courier_id,
-        "route_to_restaurant": rota_ao_restaurante,
-        "route_to_client": rota_final,
     }
 
 
-async def _send_order_ready(order_id: str):
-    sim_courier = _require_http_base_url("SIM_COURIER_URL", SIM_COURIER_URL)
-    client: httpx.AsyncClient = app.state.http
-
-    async with _state_lock:
-        st = _order_state.get(order_id)
-        if not st:
-            return
-        if st.order_ready_sent or not (
-            st.restaurant_ready and st.courier_arrived
-        ):
-            return
-
-        courier_id = st.courier_id
-        # Marcamos como enviado ANTES de chamar para evitar duplicidade em race conditions
-        st.order_ready_sent = True
-
-    try:
-        await _request_json(
-            client,
-            "POST",
-            f"{sim_courier}/simulador/entregador/order-ready",
-            timeout_s=TIMEOUT_SIM_S,
-            json={"order_id": order_id, "courier_id": courier_id},
-        )
-    except Exception as e:
-        # Se falhar o push pro simulador, revertemos o flag para tentar de novo no próximo GPS update
-        async with _state_lock:
-            st = _order_state.get(order_id)
-            if st:
-                st.order_ready_sent = False
-        print(f"[Orquestrador] Erro ao notificar simulador de entregador: {e}")
+# ─── Webhooks (totalmente stateless) ────────────────────────────────────
 
 
 @app.post("/webhook/restaurant-ready")
 async def webhook_restaurant_ready(body: RestaurantReadyWebhook):
+    """
+    Restaurante terminou de preparar o pedido.
+    Recebe driver_id e route_to_client ecoados pelo restaurante,
+    marca READY_FOR_PICKUP, e manda o motoboy fazer pickup + entrega.
+    NENHUM estado em memória é usado.
+    """
+    sim_courier = _require_http_base_url("SIM_COURIER_URL", SIM_COURIER_URL)
     client: httpx.AsyncClient = app.state.http
 
-    async with _state_lock:
-        st = _order_state.get(body.order_id)
-        if not st:
-            raise HTTPException(
-                status_code=404, detail="Pedido não encontrado no orquestrador"
-            )
-        st.restaurant_ready = True
+    if not body.driver_id or not body.route_to_client:
+        raise HTTPException(
+            status_code=400,
+            detail="webhook restaurant-ready sem driver_id ou route_to_client",
+        )
 
+    # 1. Marca READY_FOR_PICKUP
     try:
         await _request_json(
             client,
             "PATCH",
             f"{ORDER_SERVICE_URL}/pedidos/orders/{body.order_id}/status",
             timeout_s=TIMEOUT_ORDER_S,
-            json={
-                "status": "READY_FOR_PICKUP",
-                "entregador_id": st.courier_id,
-            },
+            json={"status": "READY_FOR_PICKUP", "entregador_id": body.driver_id},
         )
-    except HTTPException as e:
-        if e.status_code == 400:
-            raise HTTPException(status_code=409, detail=e.detail)
-        raise
+    except Exception as e:
+        print(f"[Orquestrador] Erro READY_FOR_PICKUP {body.order_id}: {e}")
 
-    asyncio.create_task(_send_order_ready(body.order_id))
+    # 2. Manda o motoboy buscar + entregar (fire-and-forget via background task)
+    async def _do_pickup():
+        try:
+            await _request_json(
+                client,
+                "POST",
+                f"{sim_courier}/simulador/entregador/pickup-and-deliver",
+                timeout_s=TIMEOUT_SIM_S,
+                json={
+                    "order_id": body.order_id,
+                    "courier_id": body.driver_id,
+                    "route": body.route_to_client,
+                },
+            )
+        except Exception as e:
+            print(f"[Orquestrador] Erro pickup-and-deliver {body.order_id}: {e}")
+
+    asyncio.create_task(_do_pickup())
+    return {"status": "ok"}
+
+
+@app.post("/webhook/courier-at-restaurant")
+async def webhook_courier_at_restaurant(body: CourierAtRestaurantWebhook):
+    """Motoboy chegou ao restaurante — apenas loga. O pickup é trigado pelo
+    webhook do restaurante, não pelo courier."""
+    print(f"[Orquestrador] Courier {body.courier_id} chegou ao restaurante (pedido {body.order_id})")
     return {"status": "ok"}
 
 
@@ -719,83 +836,40 @@ async def tracking_update(courier_id: str, body: CourierLocationUpdate):
     client: httpx.AsyncClient = app.state.http
 
     async def proxy_to_dynamo():
-        await _request_json(
-            client,
-            "PUT",
-            f"{ORDER_SERVICE_URL}/pedidos/drivers/{courier_id}/location",
-            timeout_s=TIMEOUT_ORDER_S,
-            json={"lat": body.lat, "lng": body.lng, "order_id": body.order_id},
-        )
+        try:
+            await _request_json(
+                client,
+                "PUT",
+                f"{ORDER_SERVICE_URL}/pedidos/drivers/{courier_id}/location",
+                timeout_s=TIMEOUT_ORDER_S,
+                json={"lat": body.lat, "lng": body.lng, "order_id": body.order_id},
+            )
+        except Exception:
+            pass  # GPS update é best-effort
 
     asyncio.create_task(proxy_to_dynamo())
-
-    if body.order_id:
-        async with _state_lock:
-            st = _order_state.get(body.order_id)
-            if st and st.courier_id == courier_id:
-                dist = _haversine_m(
-                    body.lat,
-                    body.lng,
-                    st.restaurant["lat"],
-                    st.restaurant["lon"],
-                )
-                if dist <= ARRIVAL_THRESHOLD_M:
-                    st.courier_arrived = True
-
-        asyncio.create_task(_send_order_ready(body.order_id))
-
     return {"status": "accepted"}
-
-
-@app.post("/webhook/courier-picked-up")
-async def webhook_courier_picked_up(body: CourierPickedUpWebhook):
-    sim_courier = _require_http_base_url("SIM_COURIER_URL", SIM_COURIER_URL)
-    client: httpx.AsyncClient = app.state.http
-
-    async with _state_lock:
-        st = _order_state.get(body.order_id)
-        if not st:
-            raise HTTPException(
-                status_code=404, detail="Pedido não encontrado no orquestrador"
-            )
-        route_to_client = st.route_to_client
-
-    await _request_json(
-        client,
-        "PATCH",
-        f"{ORDER_SERVICE_URL}/pedidos/orders/{body.order_id}/status",
-        timeout_s=TIMEOUT_ORDER_S,
-        json={"status": "PICKED_UP", "entregador_id": body.courier_id},
-    )
-
-    await _request_json(
-        client,
-        "POST",
-        f"{sim_courier}/simulador/entregador/go-to-client",
-        timeout_s=TIMEOUT_SIM_S,
-        json={
-            "order_id": body.order_id,
-            "courier_id": body.courier_id,
-            "route": route_to_client,
-        },
-    )
-
-    await _request_json(
-        client,
-        "PATCH",
-        f"{ORDER_SERVICE_URL}/pedidos/orders/{body.order_id}/status",
-        timeout_s=TIMEOUT_ORDER_S,
-        json={"status": "IN_TRANSIT", "entregador_id": body.courier_id},
-    )
-
-    return {"status": "ok"}
 
 
 @app.post("/webhook/delivered")
 async def webhook_delivered(body: DeliveredWebhook):
+    """Motoboy entregou o pedido — atualiza status até DELIVERED e libera o driver."""
     client: httpx.AsyncClient = app.state.http
 
-    # 1. Obter a última localização conhecida do entregador no Dynamo (onde ele finalizou a entrega)
+    # Transições intermediárias: PICKED_UP → IN_TRANSIT → DELIVERED
+    for status in ["PICKED_UP", "IN_TRANSIT", "DELIVERED"]:
+        try:
+            await _request_json(
+                client,
+                "PATCH",
+                f"{ORDER_SERVICE_URL}/pedidos/orders/{body.order_id}/status",
+                timeout_s=TIMEOUT_ORDER_S,
+                json={"status": status, "entregador_id": body.courier_id},
+            )
+        except HTTPException:
+            pass  # Pode já ter passado esse status — OK
+
+    # Sincroniza localização final do entregador (best-effort)
     try:
         driver_loc = await _request_json(
             client,
@@ -804,8 +878,6 @@ async def webhook_delivered(body: DeliveredWebhook):
             timeout_s=TIMEOUT_ORDER_S,
         )
         last_lat, last_lng = _coerce_lat_lon(driver_loc)
-
-        # 2. Persistir essa posição no PostgreSQL para que ele "aguarde" lá
         await _request_json(
             client,
             "PATCH",
@@ -814,21 +886,6 @@ async def webhook_delivered(body: DeliveredWebhook):
             json={"lat": last_lat, "lng": last_lng},
         )
     except Exception as e:
-        # Se falhar a sincronização de pós-venda, logamos o erro mas não travamos o fluxo principal
-        print(
-            f"Erro ao sincronizar localização final do entregador {body.courier_id}: {e}"
-        )
-
-    # 3. Finalizar o pedido no serviço de ordens
-    await _request_json(
-        client,
-        "PATCH",
-        f"{ORDER_SERVICE_URL}/pedidos/orders/{body.order_id}/status",
-        timeout_s=TIMEOUT_ORDER_S,
-        json={"status": "DELIVERED", "entregador_id": body.courier_id},
-    )
-
-    async with _state_lock:
-        _order_state.pop(body.order_id, None)
+        print(f"[Orquestrador] Loc sync falhou para {body.courier_id}: {e}")
 
     return {"status": "ok"}

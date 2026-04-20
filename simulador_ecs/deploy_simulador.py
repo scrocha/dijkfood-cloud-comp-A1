@@ -415,6 +415,42 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
     return alb_dns, alb_arn, tg_arns
 
 
+def setup_auto_scaling(sim_key: str, service_name: str):
+    """Configura o Application Auto Scaling para um ECS Service."""
+    try:
+        app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION)
+        
+        # Para o sim_pedidos, min=0 (pois controlamos no dash), pros outros min=1
+        min_cap = 0 if sim_key == "sim_pedidos" else 1
+
+        app_autoscaling.register_scalable_target(
+            ServiceNamespace='ecs',
+            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
+            ScalableDimension='ecs:service:DesiredCount',
+            MinCapacity=min_cap,
+            MaxCapacity=15
+        )
+        
+        app_autoscaling.put_scaling_policy(
+            ServiceNamespace='ecs',
+            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
+            ScalableDimension='ecs:service:DesiredCount',
+            PolicyName=f'{service_name}-cpu-autoscaling',
+            PolicyType='TargetTrackingScaling',
+            TargetTrackingScalingPolicyConfiguration={
+                'TargetValue': 25.0, # Target agressivo pra escalar rápido nos eventos
+                'PredefinedMetricSpecification': {
+                    'PredefinedMetricType': 'ECSServiceAverageCPUUtilization'
+                },
+                'ScaleOutCooldown': 15,
+                'ScaleInCooldown': 60
+            }
+        )
+        print(f"  [{sim_key}] Auto Scaling configurado (CPU Alvo: 25.0%, Máx: 15).")
+    except Exception as e:
+        print(f"  [{sim_key}] Aviso: Falha ao configurar Auto Scaling: {e}")
+
+
 def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
                         subnet_ids: list[str], tg_arn: str | None = None):
     """Cria um ECS Service, opcionalmente ligado a um Target Group."""
@@ -443,6 +479,7 @@ def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
                 taskDefinition=task_family,
                 forceNewDeployment=True
             )
+            setup_auto_scaling(sim_key, service_name)
             return
     except ClientError:
         pass
@@ -475,6 +512,8 @@ def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
             )
         else:
             raise e
+
+    setup_auto_scaling(sim_key, service_name)
 
 
 # =========================================================================
@@ -559,19 +598,33 @@ def deploy():
         if sim_config["TYPE"] == "service" and sim_config.get("DESIRED_COUNT", 1) > 0
     ]
     if active_services:
-        print("--- Aguardando Services ficarem estáveis ---")
+        print("--- Aguardando Services ficarem acessíveis ---")
         print(f"  Services: {', '.join(active_services)}")
-        try:
-            waiter = ecs_client.get_waiter('services_stable')
-            waiter.wait(
-                cluster=CLUSTER_NAME,
-                services=active_services,
-                WaiterConfig={'Delay': 15, 'MaxAttempts': 40}
-            )
-            print("  ✓ Todos os services estáveis!")
-        except Exception as e:
-            print(f"  ⚠️ Timeout aguardando services: {e}")
-            print("  Os services podem ainda estar subindo. Verifique o dashboard.")
+        
+        all_ready = False
+        for attempt in range(40):
+            response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=active_services)
+            ready_count = 0
+            
+            for svc in response['services']:
+                desired = svc['desiredCount']
+                running = svc.get('runningCount', 0)
+                
+                # Ignoramos deployments extras drenando, o que importa é ter as tasks desejadas rodando
+                if running >= desired and desired > 0:
+                    ready_count += 1
+                    
+            if ready_count == len(active_services):
+                all_ready = True
+                print("  ✓ Todas as tasks dos services estão rodando!")
+                break
+                
+            print(f"  Aguardando... tentativa {attempt + 1}/40. Alguns services ainda estão subindo.")
+            time.sleep(15)
+
+        if not all_ready:
+            print("  ⚠️ Timeout aguardando services.")
+            print("  Os services podem ainda estar subindo ou drenando. Verifique o AWS ECS console.")
     print()
 
     # 10. Salvar output

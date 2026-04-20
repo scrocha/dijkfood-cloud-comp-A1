@@ -28,7 +28,6 @@ Este módulo gerencia o deploy, controle e monitoramento dos **simuladores de ca
 │    -> sim-pedidos      (Service, porta 8005)     │
 │    -> sim-restaurante  (Service, porta 8006)     │
 │    -> sim-entregadores (Service, porta 8007)     │
-│    -> sim-completo     (Task batch, opcional)    │
 │    -> sim-carga        (Task batch, opcional)    │
 │                                                  │
 │    SG: dijkfood-sg-simulators                    │
@@ -57,11 +56,7 @@ Este módulo gerencia o deploy, controle e monitoramento dos **simuladores de ca
 | **Sim Restaurante** | `simulador_restaurante/` | 8006 | Recebe `POST /prepare`, simula preparo, notifica webhook |
 | **Sim Entregadores** | `simulador_entregadores/` | 8007 | Recebe rota, reporta GPS, faz pickup e delivery |
 
-### Tasks Batch (opcionais)
 
-| Simulador | Pasta | Descrição |
-|---|---|---|
-| **Sim Completo** | `simulador/` | Popula dados + dispara pedidos + ciclo completo |
 
 
 ### Pré-requisitos
@@ -157,7 +152,6 @@ Todos os logs vão para o CloudWatch Log Group `/ecs/dijkfood-simuladores`, com 
 - `sim-clientes/*` — Simulador de clientes/pedidos
 - `sim-restaurante/*` — Simulador de restaurante
 - `sim-entregadores/*` — Simulador de entregadores
-- `sim-completo/*` — Simulador completo (batch)
 - `sim-carga/*` — Benchmark unitário (batch)
 
 Podem ser visualizados pelo dashboard ou diretamente no Console AWS.
