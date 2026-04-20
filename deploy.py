@@ -26,7 +26,7 @@ SIMULADOR_PATH = DATABASE_DIR / "simulador_cadastro.py"
 OUTPUT_JSON_PATH = ROOT_DIR / "deploy_output.json"
 
 # configurações RDS
-DB_INSTANCE_TYPE = "db.t3.medium"
+DB_INSTANCE_TYPE = "db.t4g.small"
 DB_ENGINE = "postgres"
 DB_ENGINE_VERSION = "15"
 DB_ALLOCATED_STORAGE = 20
@@ -195,7 +195,7 @@ def get_or_create_rds_instance(sg_id):
             BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
             StorageType=DB_STORAGE_TYPE,
             DBName=DB_NAME,
-            MultiAZ=True,
+            MultiAZ=False,
             VpcSecurityGroupIds=[sg_id],
             PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
         )
@@ -497,7 +497,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
         family=TASK_PEDIDOS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu=TASK_CPU, memory=TASK_MEMORY,
+        cpu="256", memory="512",
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "pedidos-container",
