@@ -64,9 +64,9 @@ def list_by_status(status: OrderStatus):
 # --- Endpoints de Rastreamento (Driver Tracking) ---
 
 @app.get("/pedidos/drivers/status/free")
-def list_free_drivers():
+def list_free_drivers(limit: int = 50):
     try:
-        return loc_repo.get_free_drivers()
+        return loc_repo.get_free_drivers(limit=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

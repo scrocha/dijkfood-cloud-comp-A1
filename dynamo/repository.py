@@ -130,9 +130,9 @@ class OrderRepository:
         ]
 
         # Lógica de transição de status do entregador
-        if next_status == OrderStatus.PICKED_UP:
+        if next_status == OrderStatus.PREPARING:
             if not final_entregador_id:
-                raise ValueError("entregador_id é obrigatório para o status PICKED_UP")
+                raise ValueError("entregador_id é obrigatório ao transicionar para PREPARING, pois ele acabou de ser associado.")
             
             # Garante que o entregador está LIVRE antes de assumir o pedido
             transact_items.append({
@@ -334,11 +334,13 @@ class LocationRepository:
                 item['lng'] = float(item['lng'])
         return item
 
-    def get_free_drivers(self):
-        response = self.table.query(
-            IndexName='StatusIndex',
-            KeyConditionExpression=Key('GSI2PK').eq(f'DRIVER_STATUS#{DriverStatus.LIVRE.value}')
-        )
+    def get_free_drivers(self, limit: int = 50):
+        query_kwargs = {
+            'IndexName': 'StatusIndex',
+            'KeyConditionExpression': Key('GSI2PK').eq(f'DRIVER_STATUS#{DriverStatus.LIVRE.value}'),
+            'Limit': limit,
+        }
+        response = self.table.query(**query_kwargs)
         items = response.get('Items', [])
         for item in items:
             if 'lat' in item:

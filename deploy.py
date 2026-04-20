@@ -1,11 +1,11 @@
 import boto3
 from botocore.exceptions import ClientError
 import time
+import os
 import psycopg2
 import subprocess
 import json
 import base64
-import json
 import hashlib
 from pathlib import Path
 
@@ -150,41 +150,84 @@ def setup_security_group():
 
 def get_or_create_rds_instance(sg_id):
     print(f"Verificando instância RDS '{DB_IDENTIFIER}'.")
+
+    # 1. Verifica se já existe
+    needs_create = False
     try:
         response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
         status = response['DBInstances'][0]['DBInstanceStatus']
-        endpoint = response['DBInstances'][0]['Endpoint']['Address']
-        
+
         if status == 'available':
+            endpoint = response['DBInstances'][0]['Endpoint']['Address']
             print(f"Banco RDS pronto. Endpoint: {endpoint}")
             return endpoint
-        else:
+        elif status == 'deleting':
+            print(f"RDS está em 'deleting'. Aguardando exclusão completa...")
+            waiter_del = rds_client.get_waiter('db_instance_deleted')
+            waiter_del.wait(
+                DBInstanceIdentifier=DB_IDENTIFIER,
+                WaiterConfig={'Delay': 20, 'MaxAttempts': 60}
+            )
+            print("RDS deletado. Prosseguindo para criação.")
+            needs_create = True
+        elif status in ('creating', 'backing-up', 'modifying', 'rebooting', 'resetting-master-credentials'):
             print(f"Banco RDS status: '{status}'. Aguardando disponibilidade.")
-            
+        else:
+            print(f"Banco RDS status inesperado: '{status}'. Tentando aguardar...")
+
     except ClientError as e:
         if e.response['Error']['Code'] == 'DBInstanceNotFound':
-            print("Banco RDS não encontrado. Criando instância (pode levar alguns minutos).")
-            rds_client.create_db_instance(
-                DBInstanceIdentifier=DB_IDENTIFIER,
-                AllocatedStorage=DB_ALLOCATED_STORAGE,
-                DBInstanceClass=DB_INSTANCE_TYPE,
-                Engine=DB_ENGINE,
-                EngineVersion=DB_ENGINE_VERSION,
-                MasterUsername=DB_USER,
-                MasterUserPassword=DB_PASSWORD,
-                BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
-                StorageType=DB_STORAGE_TYPE,
-                DBName=DB_NAME,
-                MultiAZ=True,
-                VpcSecurityGroupIds=[sg_id],
-                PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
-            )
+            needs_create = True
         else:
             raise e
 
-    print("Aguardando RDS ficar 'available'.")
+    # 2. Cria se necessário
+    if needs_create:
+        print("Banco RDS não encontrado. Criando instância (pode levar 5-10 minutos).")
+        rds_client.create_db_instance(
+            DBInstanceIdentifier=DB_IDENTIFIER,
+            AllocatedStorage=DB_ALLOCATED_STORAGE,
+            DBInstanceClass=DB_INSTANCE_TYPE,
+            Engine=DB_ENGINE,
+            EngineVersion=DB_ENGINE_VERSION,
+            MasterUsername=DB_USER,
+            MasterUserPassword=DB_PASSWORD,
+            BackupRetentionPeriod=DB_BACKUP_RETENTION_PERIOD,
+            StorageType=DB_STORAGE_TYPE,
+            DBName=DB_NAME,
+            MultiAZ=True,
+            VpcSecurityGroupIds=[sg_id],
+            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
+        )
+
+        # Aguarda a instância aparecer na API (pode levar até ~60s)
+        print("Aguardando RDS aparecer na API...")
+        for attempt in range(30):
+            try:
+                resp_check = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
+                status = resp_check['DBInstances'][0]['DBInstanceStatus']
+                print(f"  RDS encontrado! Status atual: {status}")
+                if status == 'available':
+                    endpoint = resp_check['DBInstances'][0]['Endpoint']['Address']
+                    print(f"RDS disponível: {endpoint}")
+                    return endpoint
+                break
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'DBInstanceNotFound':
+                    print(f"  Tentativa {attempt+1}/30 — instância ainda não visível...")
+                    time.sleep(10)
+                else:
+                    raise e
+        else:
+            raise Exception("RDS não apareceu na API após 5 minutos. Verifique o console AWS.")
+
+    # 3. Waiter para ficar available
+    print("Aguardando RDS ficar 'available' (pode levar 5-10 min)...")
     waiter = rds_client.get_waiter('db_instance_available')
-    waiter.wait(DBInstanceIdentifier=DB_IDENTIFIER)
+    waiter.wait(
+        DBInstanceIdentifier=DB_IDENTIFIER,
+        WaiterConfig={'Delay': 25, 'MaxAttempts': 60}
+    )
     
     response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
     endpoint = response['DBInstances'][0]['Endpoint']['Address']
@@ -276,8 +319,17 @@ def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_cli
     subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
     subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:{image_tag}"], check=True)
     
-    subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
-    subprocess.run(["docker", "push", f"{ecr_uri}:{image_tag}"], check=True)
+    # Push com retry (Docker Desktop às vezes tem falhas de rede transientes)
+    for tag in ["latest", image_tag]:
+        full_uri = f"{ecr_uri}:{tag}"
+        for attempt in range(3):
+            result = subprocess.run(["docker", "push", full_uri])
+            if result.returncode == 0:
+                break
+            print(f"  ⚠️ Push falhou (tentativa {attempt+1}/3) para {tag}. Aguardando 10s...")
+            time.sleep(10)
+        else:
+            raise Exception(f"Falha ao push {full_uri} após 3 tentativas")
     
     return ecr_uri
 
@@ -571,14 +623,37 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
     def create_or_update_service(service_name, task_family, tg_arn, container_name, container_port, policy_type='cpu'):
         try:
             response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
-            if response['services'] and response['services'][0]['status'] != 'INACTIVE':
-                print(f"Serviço '{service_name}' já existe. Atualizando.")
-                ecs_client.update_service(
-                    cluster=CLUSTER_NAME,
-                    service=service_name,
-                    taskDefinition=task_family,
-                    forceNewDeployment=True
-                )
+            if response['services']:
+                status = response['services'][0]['status']
+                
+                if status == 'ACTIVE':
+                    print(f"Serviço '{service_name}' já existe. Atualizando.")
+                    ecs_client.update_service(
+                        cluster=CLUSTER_NAME,
+                        service=service_name,
+                        taskDefinition=task_family,
+                        forceNewDeployment=True
+                    )
+                elif status == 'DRAINING':
+                    print(f"Serviço '{service_name}' está sendo deletado (DRAINING). Aguardando inatividade...")
+                    waiter = ecs_client.get_waiter('services_inactive')
+                    waiter.wait(cluster=CLUSTER_NAME, services=[service_name])
+                    
+                    print(f"Criando novo serviço '{service_name}'...")
+                    ecs_client.create_service(
+                        cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
+                        desiredCount=3, launchType="FARGATE",
+                        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
+                        loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                    )
+                else: # INACTIVE
+                    print(f"Criando novo serviço '{service_name}'.")
+                    ecs_client.create_service(
+                        cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
+                        desiredCount=3, launchType="FARGATE",
+                        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
+                        loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                    )
             else:
                 print(f"Criando novo serviço '{service_name}'.")
                 ecs_client.create_service(
@@ -605,9 +680,29 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
     create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS, policy_type='cpu')
     create_or_update_service("dijkfood-pedidos-service", TASK_PEDIDOS_FAMILY, tg_ped_arn, "pedidos-container", API_PORT_PEDIDOS, policy_type='cpu')
     
-    print("Aguardando Serviços ficarem online.")
-    waiter = ecs_client.get_waiter('services_stable')
-    waiter.wait(cluster=CLUSTER_NAME, services=["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"])
+    print("Aguardando Serviços ficarem online (pode levar 5-10 min)...")
+    all_services = ["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"]
+    for attempt in range(40):
+        resp = ecs_client.describe_services(cluster=CLUSTER_NAME, services=all_services)
+        all_ready = True
+        for svc in resp.get("services", []):
+            name = svc["serviceName"]
+            running = svc.get("runningCount", 0)
+            desired = svc.get("desiredCount", 0)
+            deployments = len(svc.get("deployments", []))
+            ready = running >= desired and running > 0
+            icon = "✅" if ready else "⏳"
+            extra = f" ({deployments} deploys drenando)" if deployments > 1 else ""
+            print(f"  {icon} {name}: {running}/{desired} running{extra}")
+            if not ready:
+                all_ready = False
+        if all_ready:
+            print("  ✅ Todos os serviços com tasks rodando! Prosseguindo.")
+            break
+        print(f"  Tentativa {attempt+1}/40 — aguardando 15s...")
+        time.sleep(15)
+    else:
+        print("  ⚠️ Timeout — prosseguindo mesmo assim...")
     
     print(f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos")
 
@@ -660,14 +755,34 @@ def main():
         print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health") 
         print("=" * 60)
         
+        # Busca dados de rede para salvar no output (usado pelo deploy de simuladores)
+        vpcs_out = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
+        vpc_id_out = vpcs_out['Vpcs'][0]['VpcId']
+        subnets_out = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id_out]}])
+        subnet_ids_out = [s['SubnetId'] for s in subnets_out['Subnets'][:2]]
+
         deploy_data = {
-            "API_URL": f"http://{alb_dns}"
+            "API_URL": f"http://{alb_dns}",
+            "ALB_DNS": alb_dns,
+            "SG_ID": sg_id,
+            "VPC_ID": vpc_id_out,
+            "SUBNET_IDS": subnet_ids_out
         }
         
         with open(OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
             json.dump(deploy_data, f, indent=4)
             
         print(f"\nInformações de conexão salvas em: {OUTPUT_JSON_PATH.name}")
+        print("=" * 60)
+
+        print("\nIniciando carga inicial no banco de dados...")
+        print("Executando seed_db.py para popular o banco via APIs...")
+        try:
+            import sys
+            subprocess.run([sys.executable, str(SEED_PATH)], check=True)
+            print("População do banco concluída com sucesso!")
+        except Exception as e:
+            print(f"Aviso: Erro ao executar seed_db.py: {e}")
         print("=" * 60)
 
     except Exception as e:

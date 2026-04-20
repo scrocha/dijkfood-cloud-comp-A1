@@ -28,6 +28,26 @@ TG_NAMES = ["dijkfood-tg-cadastro", "dijkfood-tg-rotas", "dijkfood-tg-pedidos"]
 REPO_NAMES = ["dijkfood-api-cadastro", "dijkfood-api-rotas", "dijkfood-api-pedidos"]
 SERVICES = ["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"]
 
+# Simuladores
+SIM_CLUSTER_NAME = "dijkfood-simulators-cluster"
+SIM_REPO_NAMES = [
+    "dijkfood-sim-gateway", "dijkfood-sim-clientes",
+    "dijkfood-sim-restaurante", "dijkfood-sim-entregadores",
+    "dijkfood-sim-completo", "dijkfood-sim-carga"
+]
+SIM_SERVICES = [
+    "dijkfood-sim-gateway-svc", "dijkfood-sim-clientes-svc",
+    "dijkfood-sim-restaurante-svc", "dijkfood-sim-entregadores-svc"
+]
+SIM_ALB_NAME = "dijkfood-sim-alb"
+SIM_TG_NAMES = [
+    "df-sim-tg-gateway", "df-sim-tg-clientes",
+    "df-sim-tg-restaurante", "df-sim-tg-entregadores"
+]
+SIM_LOG_GROUP = "/ecs/dijkfood-simuladores"
+SIM_SG_NAME = "dijkfood-sg-simulators"
+SIM_OUTPUT_PATH = ROOT_DIR / "simulador_ecs" / "simulador_output.json"
+
 # Clientes Boto3
 ecs = boto3.client('ecs', region_name=AWS_REGION)
 elbv2 = boto3.client('elbv2', region_name=AWS_REGION)
@@ -168,6 +188,89 @@ def delete_logs():
             print(f"Log Group /ecs/{repo} deletado.")
         except Exception: pass
 
+def delete_simulator_resources():
+    """Remove toda a infraestrutura do cluster de simuladores."""
+    print("--- Removendo Infraestrutura de Simuladores ---")
+
+    # Services
+    for service in SIM_SERVICES:
+        try:
+            ecs.update_service(cluster=SIM_CLUSTER_NAME, service=service, desiredCount=0)
+            ecs.delete_service(cluster=SIM_CLUSTER_NAME, service=service, force=True)
+            print(f"  Service {service} deletado.")
+        except Exception: pass
+
+    # Tasks em execução
+    try:
+        task_arns = ecs.list_tasks(cluster=SIM_CLUSTER_NAME)['taskArns']
+        for task_arn in task_arns:
+            ecs.stop_task(cluster=SIM_CLUSTER_NAME, task=task_arn, reason="Destroy")
+        if task_arns:
+            print(f"  {len(task_arns)} tasks de simuladores paradas.")
+    except Exception: pass
+
+    # ALB interno
+    try:
+        albs = elbv2.describe_load_balancers(Names=[SIM_ALB_NAME])
+        alb_arn = albs['LoadBalancers'][0]['LoadBalancerArn']
+        listeners = elbv2.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
+        for listener in listeners:
+            elbv2.delete_listener(ListenerArn=listener['ListenerArn'])
+        elbv2.delete_load_balancer(LoadBalancerArn=alb_arn)
+        print(f"  ALB {SIM_ALB_NAME} deletado. Aguardando...")
+        waiter = elbv2.get_waiter('load_balancers_deleted')
+        waiter.wait(LoadBalancerArns=[alb_arn])
+    except Exception:
+        print(f"  ALB {SIM_ALB_NAME} não encontrado.")
+
+    # Target Groups
+    for tg_name in SIM_TG_NAMES:
+        try:
+            tgs = elbv2.describe_target_groups(Names=[tg_name])
+            for tg in tgs['TargetGroups']:
+                elbv2.delete_target_group(TargetGroupArn=tg['TargetGroupArn'])
+                print(f"  TG {tg_name} deletado.")
+        except Exception: pass
+
+    # Cluster
+    try:
+        ecs.delete_cluster(cluster=SIM_CLUSTER_NAME)
+        print(f"  Cluster {SIM_CLUSTER_NAME} deletado.")
+    except Exception: pass
+
+    # ECR Repos
+    for repo in SIM_REPO_NAMES:
+        try:
+            ecr.delete_repository(repositoryName=repo, force=True)
+            print(f"  ECR {repo} deletado.")
+        except Exception: pass
+
+    # Log Group
+    try:
+        logs.delete_log_group(logGroupName=SIM_LOG_GROUP)
+        print(f"  Log Group {SIM_LOG_GROUP} deletado.")
+    except Exception: pass
+
+    # Security Group
+    for attempt in range(5):
+        try:
+            ec2.delete_security_group(GroupName=SIM_SG_NAME)
+            print(f"  SG {SIM_SG_NAME} deletado.")
+            break
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidGroup.NotFound':
+                break
+            print(f"  Tentativa {attempt + 1}/5: SG simuladores ainda em uso...")
+            time.sleep(10)
+        except Exception: break
+
+    # Output file
+    if SIM_OUTPUT_PATH.exists():
+        SIM_OUTPUT_PATH.unlink()
+        print(f"  {SIM_OUTPUT_PATH.name} removido.")
+
+    print("  Infraestrutura de simuladores removida.")
+
 def main():
     parser = argparse.ArgumentParser(description="Script de Limpeza DijkFood")
     parser.add_argument("--hard", action="store_true", help="Deleta RDS, ECR e Security Group permanentemente")
@@ -180,6 +283,7 @@ def main():
     else:
         print("MODO SOFT: Preservando RDS, ECR e Security Group")
 
+    delete_simulator_resources()
     delete_ecs_resources()
     delete_load_balancer()
     delete_logs()
