@@ -445,7 +445,7 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
         family=TASK_PEDIDOS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu=TASK_CPU, memory=TASK_MEMORY,
+        cpu="256", memory="512",
         executionRoleArn=role_arn, taskRoleArn=role_arn,
         containerDefinitions=[{
             "name": "pedidos-container",
