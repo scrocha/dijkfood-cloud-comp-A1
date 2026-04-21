@@ -5,6 +5,7 @@ import datetime
 import logging
 import math
 import os
+import random
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
@@ -506,27 +507,47 @@ async def checkout(body: CheckoutRequest):
         raise HTTPException(status_code=503, detail="Sem entregadores")
 
     candidates = []
+    invalid_drivers = 0
     for d in drivers:
-        dlat, dlon = _coerce_lat_lon(d)
+        try:
+            dlat, dlon = _coerce_lat_lon(d)
+            driver_id = _coerce_driver_id(d)
+        except HTTPException:
+            invalid_drivers += 1
+            continue
+
         dist = _haversine_m(r_lat, r_lon, dlat, dlon)
         candidates.append(
             {
-                "id": _coerce_driver_id(d),
+                "id": driver_id,
                 "lat": dlat,
                 "lon": dlon,
                 "dist": dist,
             }
         )
+
+    if invalid_drivers:
+        logger.info(
+            "checkout_candidates trace=%s valid=%s invalid=%s",
+            checkout_trace,
+            len(candidates),
+            invalid_drivers,
+        )
+
     candidates.sort(key=lambda x: x["dist"])
     if not candidates:
         raise HTTPException(
             status_code=503, detail="Sem entregadores candidatos"
         )
 
+    candidate_pool = candidates[: min(len(candidates), 25)]
+    random.Random(checkout_trace).shuffle(candidate_pool)
+
     chosen = None
     assign_started = time.perf_counter()
+    attempt_started = assign_started
     last_error = None
-    for candidate in candidates[:10]:
+    for candidate in candidate_pool[:15]:
         try:
             await _request_json(
                 client,
@@ -548,14 +569,24 @@ async def checkout(body: CheckoutRequest):
             _log_checkout_step(
                 checkout_trace,
                 "assign_driver",
-                assign_started,
+                attempt_started,
                 status="retry",
                 detail=f"driver_id={candidate['id']} status={exc.status_code}",
             )
-            assign_started = time.perf_counter()
+            attempt_started = time.perf_counter()
             continue
 
     if not chosen:
+        _log_checkout_step(
+            checkout_trace,
+            "assign_driver",
+            assign_started,
+            status="error",
+            detail=(
+                f"attempts={len(candidate_pool[:15])} "
+                f"last_error={last_error.status_code if isinstance(last_error, HTTPException) else 'unknown'}"
+            ),
+        )
         raise HTTPException(
             status_code=503,
             detail=f"Sem entregadores disponíveis ({last_error.detail if isinstance(last_error, HTTPException) else 'indisponível'})",
@@ -566,7 +597,7 @@ async def checkout(body: CheckoutRequest):
 
     async def notify():
         try:
-            route_to_client = _interpolate_route(r_lat, r_lon, u_lat, u_lon, 5)
+            route_to_client = _interpolate_route(r_lat, r_lon, u_lat, u_lon, 3)
             await client.post(
                 f"{sim_rest}/simulador/restaurante/prepare",
                 json={
@@ -578,7 +609,7 @@ async def checkout(body: CheckoutRequest):
                 timeout=5.0,
             )
             route_to_rest = _interpolate_route(
-                chosen["lat"], chosen["lon"], r_lat, r_lon, 3
+                chosen["lat"], chosen["lon"], r_lat, r_lon, 2
             )
             await client.post(
                 f"{sim_cour}/simulador/entregador/go-to-restaurant",

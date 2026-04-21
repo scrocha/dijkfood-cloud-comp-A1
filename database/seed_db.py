@@ -13,8 +13,8 @@ fake = Faker("pt_BR")
 
 COORDENADAS = None
 
-NUM_USUARIOS = int(os.environ.get("SEED_USERS", "1000"))
-NUM_ENTREGADORES = int(os.environ.get("SEED_DRIVERS", "3000"))
+NUM_USUARIOS = int(os.environ.get("SEED_USERS", "3000"))
+NUM_ENTREGADORES = int(os.environ.get("SEED_DRIVERS", "9000"))
 NUM_RESTAURANTES = int(os.environ.get("SEED_RESTAURANTS", "100"))
 
 json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
