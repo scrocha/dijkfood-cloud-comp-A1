@@ -49,6 +49,13 @@ def main():
         print("\nFalha no deploy dos simuladores.")
         sys.exit(1)
 
+    # 3. Execução do Benchmark Automatizado (10, 50, 200 req/s)
+    print("\n" + "-" * 40)
+    print("Iniciando Benchmark Automatizado...")
+    print("-" * 40 + "\n")
+    if not run_script(ROOT_DIR / "run_benchmark.py"):
+        print("\nAviso: O benchmark automatizado falhou.")
+
     end_time = time.time()
     duration = (end_time - start_time) / 60
 

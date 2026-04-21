@@ -12,8 +12,8 @@ fake = Faker('pt_BR')
 
 COORDENADAS = None
 
-NUM_USUARIOS = int(os.environ.get("SEED_USERS", "5000"))
-NUM_ENTREGADORES = int(os.environ.get("SEED_DRIVERS", "15000"))
+NUM_USUARIOS = int(os.environ.get("SEED_USERS", "500"))
+NUM_ENTREGADORES = int(os.environ.get("SEED_DRIVERS", "1000"))
 NUM_RESTAURANTES = int(os.environ.get("SEED_RESTAURANTS", "100"))
 
 json_path = Path(__file__).resolve().parent.parent / "deploy_output.json"
@@ -75,7 +75,7 @@ CARDAPIO = {
     ]
 }
 
-BATCH_SIZE = 500
+BATCH_SIZE = 100
 
 def gerar_coordenadas_validas_sp(quantidade):
     print("Baixando fronteiras de São Paulo...")

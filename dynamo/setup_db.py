@@ -119,4 +119,4 @@ def seed_drivers_from_rds():
 
 if __name__ == '__main__':
     create_orders_table()
-    seed_drivers_from_rds()
+    # seed_drivers_from_rds()

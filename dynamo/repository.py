@@ -299,7 +299,7 @@ class LocationRepository:
         now = datetime.now(timezone.utc).isoformat()
         
         # Removido if_not_exists para evitar criação automática sem seed prévio
-        update_expr = "SET lat = :lat, lng = :lng, updated_at = :now, #s = :default_status, GSI2PK = :default_gsi2pk, GSI2SK = :driver_id, driver_id = :driver_id"
+        update_expr = "SET lat = :lat, lng = :lng, updated_at = :now, #s = if_not_exists(#s, :default_status), GSI2PK = if_not_exists(GSI2PK, :default_gsi2pk), GSI2SK = if_not_exists(GSI2SK, :driver_id), driver_id = if_not_exists(driver_id, :driver_id)"
         expr_values = {
             ':lat': str(lat),
             ':lng': str(lng),

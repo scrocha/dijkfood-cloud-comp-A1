@@ -1,14 +1,14 @@
 {
   "CLUSTER_NAME": "dijkfood-simulators-cluster",
-  "SG_ID": "sg-0ae203a04c15b4125",
-  "VPC_ID": "vpc-0e44889946a84eb94",
+  "SG_ID": "sg-0b05aa940ddab91b8",
+  "VPC_ID": "vpc-01b3cf4f751e7eb10",
   "SUBNET_IDS": [
-    "subnet-05a644d2c303f2ed4",
-    "subnet-0f6517f305dc65d54"
+    "subnet-0949be87a1215747e",
+    "subnet-0e0d2bc6b61873974"
   ],
-  "SIM_ALB_DNS": "internal-dijkfood-sim-alb-677092627.us-east-1.elb.amazonaws.com",
-  "SIM_ALB_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:loadbalancer/app/dijkfood-sim-alb/99e63c3f8fc05ba4",
-  "SIM_ALB_URL": "http://internal-dijkfood-sim-alb-677092627.us-east-1.elb.amazonaws.com",
+  "SIM_ALB_DNS": "internal-dijkfood-sim-alb-2100280938.us-east-1.elb.amazonaws.com",
+  "SIM_ALB_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:loadbalancer/app/dijkfood-sim-alb/4e158004bd96543f",
+  "SIM_ALB_URL": "http://internal-dijkfood-sim-alb-2100280938.us-east-1.elb.amazonaws.com",
   "SIMULATORS": {
     "general_api": {
       "ECR_URI": "767397891886.dkr.ecr.us-east-1.amazonaws.com/dijkfood-sim-gateway",
@@ -16,7 +16,7 @@
       "CONTAINER_NAME": "sim-gateway",
       "TYPE": "service",
       "SERVICE_NAME": "dijkfood-sim-gateway-svc",
-      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-gateway/51f0dc03147dbece"
+      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-gateway/912ebeaea2fbe961"
     },
     "sim_pedidos": {
       "ECR_URI": "767397891886.dkr.ecr.us-east-1.amazonaws.com/dijkfood-sim-clientes",
@@ -24,7 +24,7 @@
       "CONTAINER_NAME": "sim-clientes",
       "TYPE": "service",
       "SERVICE_NAME": "dijkfood-sim-clientes-svc",
-      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-clientes/66bddb10a3f6c77d"
+      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-clientes/c5c1bbfda68c628b"
     },
     "sim_restaurante": {
       "ECR_URI": "767397891886.dkr.ecr.us-east-1.amazonaws.com/dijkfood-sim-restaurante",
@@ -32,7 +32,7 @@
       "CONTAINER_NAME": "sim-restaurante",
       "TYPE": "service",
       "SERVICE_NAME": "dijkfood-sim-restaurante-svc",
-      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-restaurante/5f732ed0fc817255"
+      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-restaurante/c5b2ecea91834779"
     },
     "sim_entregadores": {
       "ECR_URI": "767397891886.dkr.ecr.us-east-1.amazonaws.com/dijkfood-sim-entregadores",
@@ -40,7 +40,7 @@
       "CONTAINER_NAME": "sim-entregadores",
       "TYPE": "service",
       "SERVICE_NAME": "dijkfood-sim-entregadores-svc",
-      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-entregadores/80e4ca7c7303ad1a"
+      "TG_ARN": "arn:aws:elasticloadbalancing:us-east-1:767397891886:targetgroup/df-sim-tg-entregadores/1ca2df05b3f45de7"
     }
   }
 }
