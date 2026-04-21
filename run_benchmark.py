@@ -167,51 +167,35 @@ def update_sim_rate(new_rate):
     print(f"Serviço {svc_name} atualizado com nova TD (Rate={new_rate}).")
 
 
-def fetch_logs(
-    log_group_name, stream_prefix, limit_streams=10, limit_events=100
-):
-    """Busca logs do CloudWatch filtrados por prefixo de stream."""
-    response = logs.describe_log_streams(
-        logGroupName=log_group_name,
-        logStreamNamePrefix=stream_prefix,
-    )
+def fetch_logs(log_group_name, stream_prefix, start_time_ms):
+    """Busca eventos do CloudWatch por janela de tempo e prefixo de stream."""
+    events = []
+    next_token = None
 
-    streams = response.get("logStreams", [])
-    if not streams:
-        return None
+    while True:
+        kwargs = {
+            "logGroupName": log_group_name,
+            "logStreamNamePrefix": stream_prefix,
+            "startTime": start_time_ms,
+            "interleaved": True,
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
 
-    streams.sort(key=lambda x: x.get("lastEventTimestamp", 0), reverse=True)
-    streams = streams[:limit_streams]
+        response = logs.filter_log_events(**kwargs)
+        events.extend(response.get("events", []))
+        new_token = response.get("nextToken")
+        if not new_token or new_token == next_token:
+            break
+        next_token = new_token
 
-    all_logs = []
-    for stream in streams:
-        events_resp = logs.get_log_events(
-            logGroupName=log_group_name,
-            logStreamName=stream["logStreamName"],
-            limit=limit_events,
-            startFromHead=False,
-        )
-        all_logs.append(
-            {
-                "stream": stream["logStreamName"],
-                "events": events_resp.get("events", []),
-            }
-        )
-
-    return all_logs
+    return [{"stream": stream_prefix, "events": events}] if events else None
 
 
-def collect_log_events(
-    log_group_name, stream_prefix, limit_streams=10, limit_events=200
-):
-    """Busca eventos recentes em streams com o prefixo informado."""
+def collect_log_events(log_group_name, stream_prefix, start_time_ms):
+    """Busca eventos recentes do CloudWatch dentro da janela do benchmark."""
     try:
-        return fetch_logs(
-            log_group_name,
-            stream_prefix,
-            limit_streams=limit_streams,
-            limit_events=limit_events,
-        )
+        return fetch_logs(log_group_name, stream_prefix, start_time_ms)
     except Exception as e:
         print(f"Erro ao buscar logs de {stream_prefix}: {e}")
         return None
@@ -391,16 +375,10 @@ def collect_endpoint_metrics(duration_s=30):
     time.sleep(duration_s)
 
     general_logs = collect_log_events(
-        LOG_GROUP_SIM,
-        GENERAL_API_INFO["LOG_STREAM_PREFIX"],
-        limit_streams=10,
-        limit_events=200,
+        LOG_GROUP_SIM, GENERAL_API_INFO["LOG_STREAM_PREFIX"], start_time
     )
     simulator_logs = collect_log_events(
-        LOG_GROUP_SIM,
-        SIM_CLIENTES_INFO["LOG_STREAM_PREFIX"],
-        limit_streams=5,
-        limit_events=100,
+        LOG_GROUP_SIM, SIM_CLIENTES_INFO["LOG_STREAM_PREFIX"], start_time
     )
 
     general_metrics = _parse_general_api_logs(general_logs, start_time)
