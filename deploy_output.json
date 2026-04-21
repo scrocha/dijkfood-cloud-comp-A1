@@ -1,10 +1,10 @@
 {
-    "API_URL": "http://dijkfood-alb-1502337348.us-east-1.elb.amazonaws.com",
-    "ALB_DNS": "dijkfood-alb-1502337348.us-east-1.elb.amazonaws.com",
-    "SG_ID": "sg-007f6bd762b0873b2",
-    "VPC_ID": "vpc-0d0f469e2809d5cf9",
+    "API_URL": "http://dijkfood-alb-2053736972.us-east-1.elb.amazonaws.com",
+    "ALB_DNS": "dijkfood-alb-2053736972.us-east-1.elb.amazonaws.com",
+    "SG_ID": "sg-087a3c0e4377fd9f4",
+    "VPC_ID": "vpc-0e44889946a84eb94",
     "SUBNET_IDS": [
-        "subnet-0ab7f6bb75eefd2f6",
-        "subnet-0f0145719414a944f"
+        "subnet-05a644d2c303f2ed4",
+        "subnet-0f6517f305dc65d54"
     ]
 }
