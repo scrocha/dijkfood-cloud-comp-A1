@@ -13,9 +13,12 @@ from simulador_entregadores.models import (
 )
 
 # Configurações
-GENERAL_API_URL = os.getenv("GENERAL_API_URL", "http://general-api:8000").rstrip("/")
+GENERAL_API_URL = os.getenv(
+    "GENERAL_API_URL", "http://general-api:8000"
+).rstrip("/")
 
 active_tasks = set()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,10 +30,15 @@ async def lifespan(app: FastAPI):
     await app.state.http.aclose()
 
 
-app = FastAPI(title="DijkFood - Worker de Movimentação de Entregadores", lifespan=lifespan)
+app = FastAPI(
+    title="DijkFood - Worker de Movimentação de Entregadores",
+    lifespan=lifespan,
+)
 
 
-async def _report_location(courier_id: str, order_id: str, lat: float, lon: float):
+async def _report_location(
+    courier_id: str, order_id: str, lat: float, lon: float
+):
     """Envia a posição atual para a API Geral (best-effort)."""
     client: httpx.AsyncClient = app.state.http
     try:
@@ -50,10 +58,14 @@ async def _executar_trajeto(courier_id: str, order_id: str, route: list):
         lon = point.get("lon") or point.get("lng")
         if lat is not None and lon is not None:
             await _report_location(courier_id, order_id, lat, lon)
-            await asyncio.sleep(0.3)  # 300ms entre steps (reduz flooding)
+            await asyncio.sleep(
+                0.08
+            )  # reduz o tempo de liberação do entregador
 
 
-async def _webhook_com_retry(endpoint: str, payload: dict, max_retries: int = 3):
+async def _webhook_com_retry(
+    endpoint: str, payload: dict, max_retries: int = 3
+):
     """Envia webhook com retry — essencial para o ciclo de vida funcionar."""
     client: httpx.AsyncClient = app.state.http
     for attempt in range(max_retries):
@@ -65,10 +77,14 @@ async def _webhook_com_retry(endpoint: str, payload: dict, max_retries: int = 3)
             )
             if resp.status_code < 500:
                 return resp
-            print(f"[Worker] Webhook {endpoint} retornou {resp.status_code}, retry {attempt+1}")
+            print(
+                f"[Worker] Webhook {endpoint} retornou {resp.status_code}, retry {attempt + 1}"
+            )
         except Exception as e:
-            print(f"[Worker] Webhook {endpoint} falhou: {type(e).__name__}, retry {attempt+1}")
-        await asyncio.sleep(1.0 * (attempt + 1))
+            print(
+                f"[Worker] Webhook {endpoint} falhou: {type(e).__name__}, retry {attempt + 1}"
+            )
+        await asyncio.sleep(0.25 * (attempt + 1))
     print(f"[Worker] Webhook {endpoint} falhou após {max_retries} tentativas!")
     return None
 
@@ -76,9 +92,13 @@ async def _webhook_com_retry(endpoint: str, payload: dict, max_retries: int = 3)
 @app.post("/simulador/entregador/go-to-restaurant")
 async def go_to_restaurant(req: GoToRestaurantRequest):
     async def _fase_restaurante():
-        print(f"[Worker] Courier {req.courier_id} indo ao Restaurante (Pedido {req.order_id})")
+        print(
+            f"[Worker] Courier {req.courier_id} indo ao Restaurante (Pedido {req.order_id})"
+        )
         await _executar_trajeto(req.courier_id, req.order_id, req.route)
-        print(f"[Worker] Courier {req.courier_id} chegou ao restaurante (Pedido {req.order_id})")
+        print(
+            f"[Worker] Courier {req.courier_id} chegou ao restaurante (Pedido {req.order_id})"
+        )
 
         await _webhook_com_retry(
             "/webhook/courier-at-restaurant",
@@ -94,14 +114,18 @@ async def go_to_restaurant(req: GoToRestaurantRequest):
 @app.post("/simulador/entregador/pickup-and-deliver")
 async def pickup_and_deliver(req: GoToClientRequest):
     async def _fase_entrega():
-        print(f"[Worker] Courier {req.courier_id} coletou Pedido {req.order_id}, indo ao cliente...")
-        await asyncio.sleep(random.uniform(0.3, 0.8))
+        print(
+            f"[Worker] Courier {req.courier_id} coletou Pedido {req.order_id}, indo ao cliente..."
+        )
+        await asyncio.sleep(random.uniform(0.08, 0.2))
 
         # Executa a rota até o cliente
         await _executar_trajeto(req.courier_id, req.order_id, req.route)
 
         # Notifica a entrega (COM RETRY)
-        print(f"[Worker] Courier {req.courier_id} entregou Pedido {req.order_id}!")
+        print(
+            f"[Worker] Courier {req.courier_id} entregou Pedido {req.order_id}!"
+        )
         await _webhook_com_retry(
             "/webhook/delivered",
             {"order_id": req.order_id, "courier_id": req.courier_id},
@@ -110,16 +134,21 @@ async def pickup_and_deliver(req: GoToClientRequest):
     task = asyncio.create_task(_fase_entrega())
     active_tasks.add(task)
     task.add_done_callback(active_tasks.discard)
-    return {"status": "picking_up_and_delivering", "courier_id": req.courier_id}
+    return {
+        "status": "picking_up_and_delivering",
+        "courier_id": req.courier_id,
+    }
 
 
 @app.post("/simulador/entregador/go-to-client")
 async def go_to_client(req: GoToClientRequest):
     async def _fase_entrega():
         print(f"[Worker] Courier {req.courier_id} entregando ao Cliente.")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.15)
         await _executar_trajeto(req.courier_id, req.order_id, req.route)
-        print(f"[Worker] Courier {req.courier_id} entregou Pedido {req.order_id}!")
+        print(
+            f"[Worker] Courier {req.courier_id} entregou Pedido {req.order_id}!"
+        )
         await _webhook_com_retry(
             "/webhook/delivered",
             {"order_id": req.order_id, "courier_id": req.courier_id},
@@ -143,4 +172,5 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8007)
