@@ -570,26 +570,7 @@ def print_infra_stats(api_url: str):
         except Exception as e:
             print(f"  {label:<20}: Falha ao conectar")
 
-    # Estatísticas do DynamoDB
-    try:
-        region = config["AWS_REGION"]
-        table_name = "DijkfoodOrders" # Nome padrão
-        dynamo_client = boto3.client('dynamodb', region_name=region)
-        
-        # Scan simplificado apenas para contagem de Drivers no Dynamo
-        resp = dynamo_client.scan(
-            TableName=table_name,
-            Select='COUNT',
-            FilterExpression="begins_with(PK, :d) AND SK = :m",
-            ExpressionAttributeValues={
-                ":d": {"S": "DRIVER#"},
-                ":m": {"S": "METADATA"}
-            }
-        )
-        print(f"  {'Entregadores (Dynamo)':<20}: {resp.get('Count', 0)}")
-    except Exception as e:
-        print(f"  {'Entregadores (Dynamo)':<20}: N/A")
-    
+   
     print("=" * 40 + "\n")
 
 

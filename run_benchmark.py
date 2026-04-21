@@ -26,6 +26,65 @@ SIM_CLIENTES_INFO = sim_config_data["SIMULATORS"]["sim_pedidos"]
 # Clientes Boto3
 ecs = boto3.client("ecs", region_name=AWS_REGION)
 logs = boto3.client("logs", region_name=AWS_REGION)
+dynamodb = boto3.client("dynamodb", region_name=AWS_REGION)
+
+
+def get_order_stats(table_name="DijkfoodOrders"):
+    """Consulta o DynamoDB para pegar contagem de pedidos por status."""
+    def count_status(status):
+        try:
+            resp = dynamodb.query(
+                TableName=table_name,
+                IndexName="StatusIndex",
+                Select="COUNT",
+                KeyConditionExpression="GSI2PK = :g",
+                ExpressionAttributeValues={":g": {"S": f"STATUS#{status}"}}
+            )
+            return resp.get("Count", 0)
+        except:
+            return 0
+
+    return {
+        "CONFIRMED": count_status("CONFIRMED"),
+        "PREPARING": count_status("PREPARING"),
+        "READY": count_status("READY_FOR_PICKUP"),
+        "PICKED": count_status("PICKED_UP"),
+        "TRANSIT": count_status("IN_TRANSIT"),
+        "DELIVERED": count_status("DELIVERED")
+    }
+
+
+def get_last_p95():
+    """Pega a métrica P95 mais recente dos logs."""
+    prefix = SIM_CLIENTES_INFO["LOG_STREAM_PREFIX"]
+    try:
+        response = logs.describe_log_streams(
+            logGroupName=LOG_GROUP_SIM,
+            logStreamNamePrefix=prefix,
+        )
+        streams = response.get("logStreams", [])
+        if not streams:
+            return "---"
+        
+        # Ordenar pelos mais recentes
+        streams.sort(key=lambda x: x.get("lastEventTimestamp", 0), reverse=True)
+        
+        for s in streams[:2]:
+            events = logs.get_log_events(
+                logGroupName=LOG_GROUP_SIM,
+                logStreamName=s["logStreamName"],
+                limit=50,
+            )
+            for ev in reversed(events.get("events", [])):
+                msg = ev["message"]
+                if "[METRICS]" in msg:
+                    # Regex ajustado para o formato real: [METRICS] P95=27423ms
+                    match = re.search(r"P95=(\d+)ms", msg)
+                    if match:
+                        return f"{match.group(1)}ms"
+    except Exception as e:
+        pass
+    return "---"
 
 
 def run_command(cmd, description):
@@ -177,16 +236,6 @@ def main():
     print("INICIANDO BENCHMARK AUTOMATIZADO DIJKFOOD")
     print("=" * 60)
 
-    # 1. Deploy Inicial
-    run_command(
-        [sys.executable, "deploy.py"], "Deploy da Infraestrutura Principal"
-    )
-
-    # 2. Deploy Simuladores
-    run_command(
-        [sys.executable, "simulador_ecs/deploy_simulador.py"],
-        "Deploy dos Simuladores",
-    )
 
     scenarios = [10, 50, 200]
     final_results = []
@@ -199,17 +248,36 @@ def main():
         # Ajustar Rate
         update_sim_rate(rate)
 
-        # Esperar 60s para estabilização (Requirement: "espere 1 minuto para que o alb e o cluster estabilizem")
+        # Esperar 5 minutos para estabilização (Requirement: "exatamente 10, 50, 200 req/s e 5 minutos de duração")
         print(
-            "Aguardando 60 segundos para estabilização do cluster e Auto Scaling"
+            "Aguardando 300 segundos (5 minutos) para observar a estabilização do cluster e Auto Scaling"
         )
-        time.sleep(60)
+        
+        # Loop de monitoramento a cada 2 segundos
+        start_wait = time.time()
+        wait_duration = 300
+        while time.time() - start_wait < wait_duration:
+            elapsed = int(time.time() - start_wait)
+            remaining = wait_duration - elapsed
+            instances = get_running_instances()
+            stats = get_order_stats()
+            last_p95 = get_last_p95()
+            
+            # Formata a string de instâncias para uma linha compacta
+            inst_str = " | ".join([f"{k.split('-')[-2] if '-' in k else k}: {v}" for k, v in instances.items()])
+            
+            # Formata a string de pedidos (Status)
+            order_str = f"Conf: {stats['CONFIRMED']} | Prep: {stats['PREPARING']} | Pront: {stats['READY']} | Entreg: {stats['DELIVERED']}"
 
-        # Medir instâncias
+            print(f"\r[{elapsed:03d}s/{wait_duration}s] P95: {last_p95} | {order_str} | Inst: {inst_str}", end="", flush=True)
+            time.sleep(2)
+        print("\nPronto! Iniciando coleta de métricas P95 finais...")
+
+        # Medir instâncias finais
         instances = get_running_instances()
 
         # Medir latência (Requirement: "API deve responder em menos de 500ms no percentil 95")
-        p95_avg = collect_p95_metrics(30)
+        p95_avg = collect_p95_metrics(60)
 
         result = {
             "scenario_rate_per_sec": rate,
