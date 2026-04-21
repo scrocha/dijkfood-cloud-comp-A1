@@ -6,6 +6,21 @@
   "DEFAULT_CPU": "512",
   "DEFAULT_MEMORY": "1024",
   "SIM_ALB_NAME": "dijkfood-sim-alb",
+  "MAIN_CLUSTER_NAME": "dijkfood-cluster",
+  "MAIN_SERVICES": {
+    "cadastro": {
+      "SERVICE_NAME": "dijkfood-cadastro-service",
+      "DESCRIPTION": "API Cadastro"
+    },
+    "rotas": {
+      "SERVICE_NAME": "dijkfood-rotas-service",
+      "DESCRIPTION": "API Rotas"
+    },
+    "pedidos": {
+      "SERVICE_NAME": "dijkfood-pedidos-service",
+      "DESCRIPTION": "API Pedidos"
+    }
+  },
   "SIMULATORS": {
     "general_api": {
       "REPO_NAME": "dijkfood-sim-gateway",

@@ -17,14 +17,16 @@ Uso:
     python simulador_ecs/deploy_simulador.py --destroy   # destrói tudo
 """
 
-import boto3
-import json
-import subprocess
-import base64
 import argparse
+import base64
+import json
+import os
+import subprocess
 import time
-from botocore.exceptions import ClientError
 from pathlib import Path
+
+import boto3
+from botocore.exceptions import ClientError
 
 # =========================================================================
 # CAMINHOS
@@ -51,12 +53,26 @@ SIMULATORS = config["SIMULATORS"]
 # =========================================================================
 # CLIENTES BOTO3
 # =========================================================================
-ecs_client = boto3.client('ecs', region_name=AWS_REGION)
-ecr_client = boto3.client('ecr', region_name=AWS_REGION)
-logs_client = boto3.client('logs', region_name=AWS_REGION)
-ec2_client = boto3.client('ec2', region_name=AWS_REGION)
-sts_client = boto3.client('sts', region_name=AWS_REGION)
-elbv2_client = boto3.client('elbv2', region_name=AWS_REGION)
+ecs_client = boto3.client("ecs", region_name=AWS_REGION)
+ecr_client = boto3.client("ecr", region_name=AWS_REGION)
+logs_client = boto3.client("logs", region_name=AWS_REGION)
+ec2_client = boto3.client("ec2", region_name=AWS_REGION)
+sts_client = boto3.client("sts", region_name=AWS_REGION)
+elbv2_client = boto3.client("elbv2", region_name=AWS_REGION)
+
+
+def build_docker_env():
+    docker_env = {
+        **os.environ,
+        "DOCKER_CONFIG": str(ROOT_DIR / ".docker_config"),
+    }
+    docker_desktop_socket = Path.home() / ".docker" / "desktop" / "docker.sock"
+    if (
+        not Path("/var/run/docker.sock").exists()
+        and docker_desktop_socket.exists()
+    ):
+        docker_env["DOCKER_HOST"] = f"unix://{docker_desktop_socket}"
+    return docker_env
 
 
 # =========================================================================
@@ -87,13 +103,16 @@ def load_main_deploy_output() -> dict:
     return output
 
 
-def resolve_env_vars(env_mapping: dict, deploy_output: dict,
-                     sim_alb_url: str = "") -> list[dict]:
+def resolve_env_vars(
+    env_mapping: dict, deploy_output: dict, sim_alb_url: str = ""
+) -> list[dict]:
     """Resolve placeholders {API_URL} e {SIM_ALB_URL} nos env vars."""
     result = []
     for key, value in env_mapping.items():
         resolved = value
-        resolved = resolved.replace("{API_URL}", deploy_output.get("API_URL", "http://localhost"))
+        resolved = resolved.replace(
+            "{API_URL}", deploy_output.get("API_URL", "http://localhost")
+        )
         resolved = resolved.replace("{SIM_ALB_URL}", sim_alb_url)
         result.append({"name": key, "value": resolved})
     return result
@@ -107,20 +126,24 @@ def setup_log_group():
     print(f"  Verificando Log Group: {LOG_GROUP_NAME}")
     try:
         logs_client.create_log_group(logGroupName=LOG_GROUP_NAME)
-        print(f"  Log Group criado.")
+        print("  Log Group criado.")
     except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceAlreadyExistsException':
-            print(f"  Log Group já existe.")
+        if e.response["Error"]["Code"] == "ResourceAlreadyExistsException":
+            print("  Log Group já existe.")
         else:
             raise e
 
 
 def get_vpc_and_subnets() -> tuple[str, list[str]]:
     """Obtém VPC ID e subnets da VPC padrão."""
-    vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-    vpc_id = vpcs['Vpcs'][0]['VpcId']
-    subnets = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
-    subnet_ids = [s['SubnetId'] for s in subnets['Subnets'][:2]]
+    vpcs = ec2_client.describe_vpcs(
+        Filters=[{"Name": "isDefault", "Values": ["true"]}]
+    )
+    vpc_id = vpcs["Vpcs"][0]["VpcId"]
+    subnets = ec2_client.describe_subnets(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+    )
+    subnet_ids = [s["SubnetId"] for s in subnets["Subnets"][:2]]
     return vpc_id, subnet_ids
 
 
@@ -132,15 +155,15 @@ def setup_security_group(vpc_id: str, main_sg_id: str | None = None) -> str:
     try:
         sg_response = ec2_client.create_security_group(
             GroupName=SG_NAME,
-            Description='Security Group para o cluster de simuladores DijkFood',
-            VpcId=vpc_id
+            Description="Security Group para o cluster de simuladores DijkFood",
+            VpcId=vpc_id,
         )
-        sg_id = sg_response['GroupId']
+        sg_id = sg_response["GroupId"]
         print(f"  SG '{SG_NAME}' criado (ID: {sg_id}).")
     except ClientError as e:
-        if e.response['Error']['Code'] == 'InvalidGroup.Duplicate':
+        if e.response["Error"]["Code"] == "InvalidGroup.Duplicate":
             sgs = ec2_client.describe_security_groups(GroupNames=[SG_NAME])
-            sg_id = sgs['SecurityGroups'][0]['GroupId']
+            sg_id = sgs["SecurityGroups"][0]["GroupId"]
             print(f"  SG '{SG_NAME}' já existe. ID: {sg_id}")
         else:
             raise e
@@ -157,16 +180,18 @@ def setup_security_group(vpc_id: str, main_sg_id: str | None = None) -> str:
         try:
             ec2_client.authorize_security_group_ingress(
                 GroupId=sg_id,
-                IpPermissions=[{
-                    'IpProtocol': 'tcp',
-                    'FromPort': port,
-                    'ToPort': port,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
-                }]
+                IpPermissions=[
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": port,
+                        "ToPort": port,
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    }
+                ],
             )
             print(f"  Porta {port} ({label}) aberta.")
         except ClientError as e:
-            if e.response['Error']['Code'] != 'InvalidPermission.Duplicate':
+            if e.response["Error"]["Code"] != "InvalidPermission.Duplicate":
                 print(f"  Aviso ao abrir porta {port}: {e}")
 
     # Se temos o SG do cluster principal, permitir que os simuladores acessem as APIs
@@ -174,16 +199,20 @@ def setup_security_group(vpc_id: str, main_sg_id: str | None = None) -> str:
         try:
             ec2_client.authorize_security_group_ingress(
                 GroupId=main_sg_id,
-                IpPermissions=[{
-                    'IpProtocol': 'tcp',
-                    'FromPort': 80,
-                    'ToPort': 80,
-                    'UserIdGroupPairs': [{'GroupId': sg_id}]
-                }]
+                IpPermissions=[
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 80,
+                        "ToPort": 80,
+                        "UserIdGroupPairs": [{"GroupId": sg_id}],
+                    }
+                ],
             )
-            print(f"  SG principal ({main_sg_id}): ingress do SG simuladores na porta 80 (ALB).")
+            print(
+                f"  SG principal ({main_sg_id}): ingress do SG simuladores na porta 80 (ALB)."
+            )
         except ClientError as e:
-            if e.response['Error']['Code'] != 'InvalidPermission.Duplicate':
+            if e.response["Error"]["Code"] != "InvalidPermission.Duplicate":
                 print(f"  Aviso ao configurar cross-SG: {e}")
 
     return sg_id
@@ -204,37 +233,70 @@ def build_and_push_image(sim_key: str, sim_config: dict) -> str:
         ecr_client.create_repository(repositoryName=repo_name)
         print(f"  [{sim_key}] Repositório ECR criado: {repo_name}")
     except ClientError as e:
-        if e.response['Error']['Code'] != 'RepositoryAlreadyExistsException':
+        if e.response["Error"]["Code"] != "RepositoryAlreadyExistsException":
             raise e
         print(f"  [{sim_key}] Repositório ECR já existe: {repo_name}")
 
     # Login no ECR
     auth_token = ecr_client.get_authorization_token()
-    token = auth_token['authorizationData'][0]['authorizationToken']
-    username, password = base64.b64decode(token).decode('utf-8').split(':')
-    registry = auth_token['authorizationData'][0]['proxyEndpoint']
+    token = auth_token["authorizationData"][0]["authorizationToken"]
+    username, password = base64.b64decode(token).decode("utf-8").split(":")
+    registry = auth_token["authorizationData"][0]["proxyEndpoint"]
+
+    docker_env = build_docker_env()
+    os.makedirs(docker_env["DOCKER_CONFIG"], exist_ok=True)
 
     subprocess.run(
-        ["docker", "login", "--username", username, "--password-stdin", registry],
-        input=password.encode('utf-8'),
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [
+            "docker",
+            "login",
+            "--username",
+            username,
+            "--password-stdin",
+            registry,
+        ],
+        input=password.encode("utf-8"),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=docker_env,
     )
 
     # Build a partir da raiz do projeto
     print(f"  [{sim_key}] Construindo imagem...")
     subprocess.run(
-        ["docker", "build", "-t", repo_name, "-f", str(dockerfile_path), str(ROOT_DIR)],
-        check=True
+        [
+            "docker",
+            "build",
+            "-t",
+            repo_name,
+            "-f",
+            str(dockerfile_path),
+            str(ROOT_DIR),
+        ],
+        check=True,
+        env=docker_env,
     )
-    subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
-    subprocess.run(["docker", "push", f"{ecr_uri}:latest"], check=True)
+    subprocess.run(
+        ["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"],
+        check=True,
+        env=docker_env,
+    )
+    subprocess.run(
+        ["docker", "push", f"{ecr_uri}:latest"], check=True, env=docker_env
+    )
     print(f"  [{sim_key}] Imagem enviada: {ecr_uri}:latest")
 
     return ecr_uri
 
 
-def register_task_definition(sim_key: str, sim_config: dict, ecr_uri: str,
-                              env_vars: list[dict], role_arn: str):
+def register_task_definition(
+    sim_key: str,
+    sim_config: dict,
+    ecr_uri: str,
+    env_vars: list[dict],
+    role_arn: str,
+):
     """Registra a Task Definition para um simulador."""
     task_family = sim_config["TASK_FAMILY"]
     container_name = sim_config["CONTAINER_NAME"]
@@ -253,17 +315,19 @@ def register_task_definition(sim_key: str, sim_config: dict, ecr_uri: str,
                 "awslogs-group": LOG_GROUP_NAME,
                 "awslogs-region": AWS_REGION,
                 "awslogs-stream-prefix": log_prefix,
-                "awslogs-create-group": "true"
-            }
-        }
+                "awslogs-create-group": "true",
+            },
+        },
     }
 
     # Adicionar port mapping para services
     if "CONTAINER_PORT" in sim_config:
-        container_def["portMappings"] = [{
-            "containerPort": sim_config["CONTAINER_PORT"],
-            "hostPort": sim_config["CONTAINER_PORT"]
-        }]
+        container_def["portMappings"] = [
+            {
+                "containerPort": sim_config["CONTAINER_PORT"],
+                "hostPort": sim_config["CONTAINER_PORT"],
+            }
+        ]
 
     # Adicionar CMD se especificado
     if sim_config.get("DEFAULT_CMD"):
@@ -277,7 +341,7 @@ def register_task_definition(sim_key: str, sim_config: dict, ecr_uri: str,
         memory=DEFAULT_MEMORY,
         executionRoleArn=role_arn,
         taskRoleArn=role_arn,
-        containerDefinitions=[container_def]
+        containerDefinitions=[container_def],
     )
     print(f"  [{sim_key}] Task Definition registrada.")
 
@@ -285,8 +349,9 @@ def register_task_definition(sim_key: str, sim_config: dict, ecr_uri: str,
 # =========================================================================
 # ALB INTERNO
 # =========================================================================
-def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
-                       sg_id: str) -> tuple[str, str, dict]:
+def setup_internal_alb(
+    vpc_id: str, subnet_ids: list[str], sg_id: str
+) -> tuple[str, str, dict]:
     """
     Cria ALB interno com Target Groups e routing rules para os 4 services.
 
@@ -307,25 +372,25 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
             Name=SIM_ALB_NAME,
             Subnets=subnet_ids,
             SecurityGroups=[sg_id],
-            Scheme='internal',
-            Type='application',
-            IpAddressType='ipv4'
+            Scheme="internal",
+            Type="application",
+            IpAddressType="ipv4",
         )
-        alb_arn = alb_response['LoadBalancers'][0]['LoadBalancerArn']
-        alb_dns = alb_response['LoadBalancers'][0]['DNSName']
+        alb_arn = alb_response["LoadBalancers"][0]["LoadBalancerArn"]
+        alb_dns = alb_response["LoadBalancers"][0]["DNSName"]
         print(f"  ALB criado: {alb_dns}")
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DuplicateLoadBalancerName':
+        if e.response["Error"]["Code"] == "DuplicateLoadBalancerName":
             albs = elbv2_client.describe_load_balancers(Names=[SIM_ALB_NAME])
-            alb_arn = albs['LoadBalancers'][0]['LoadBalancerArn']
-            alb_dns = albs['LoadBalancers'][0]['DNSName']
+            alb_arn = albs["LoadBalancers"][0]["LoadBalancerArn"]
+            alb_dns = albs["LoadBalancers"][0]["DNSName"]
             print(f"  ALB já existe: {alb_dns}")
         else:
             raise
 
     # Aguardar ALB ficar disponível
     print("  Aguardando ALB ficar disponível...")
-    waiter = elbv2_client.get_waiter('load_balancer_available')
+    waiter = elbv2_client.get_waiter("load_balancer_available")
     waiter.wait(LoadBalancerArns=[alb_arn])
     print("  ALB disponível.")
 
@@ -344,22 +409,24 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
         try:
             tg_resp = elbv2_client.create_target_group(
                 Name=tg_name,
-                Protocol='HTTP',
+                Protocol="HTTP",
                 Port=port,
                 VpcId=vpc_id,
-                TargetType='ip',
-                HealthCheckProtocol='HTTP',
+                TargetType="ip",
+                HealthCheckProtocol="HTTP",
                 HealthCheckPath=health_path,
                 HealthCheckIntervalSeconds=30,
                 HealthyThresholdCount=2,
                 UnhealthyThresholdCount=3,
             )
-            tg_arn = tg_resp['TargetGroups'][0]['TargetGroupArn']
-            print(f"  TG '{tg_name}' criado (porta {port}, health: {health_path})")
+            tg_arn = tg_resp["TargetGroups"][0]["TargetGroupArn"]
+            print(
+                f"  TG '{tg_name}' criado (porta {port}, health: {health_path})"
+            )
         except ClientError as e:
-            if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+            if e.response["Error"]["Code"] == "DuplicateTargetGroupName":
                 tgs = elbv2_client.describe_target_groups(Names=[tg_name])
-                tg_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+                tg_arn = tgs["TargetGroups"][0]["TargetGroupArn"]
                 print(f"  TG '{tg_name}' já existe.")
             else:
                 raise
@@ -371,24 +438,32 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
             default_tg_arn = tg_arn
 
     # 3. Criar Listener (porta 80, default → general_api)
-    listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
-    listener_arn = next((l['ListenerArn'] for l in listeners if l['Port'] == 80), None)
+    listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)[
+        "Listeners"
+    ]
+    listener_arn = next(
+        (l["ListenerArn"] for l in listeners if l["Port"] == 80), None
+    )
 
     if not listener_arn:
         listener_resp = elbv2_client.create_listener(
             LoadBalancerArn=alb_arn,
-            Protocol='HTTP',
+            Protocol="HTTP",
             Port=80,
-            DefaultActions=[{'Type': 'forward', 'TargetGroupArn': default_tg_arn}]
+            DefaultActions=[
+                {"Type": "forward", "TargetGroupArn": default_tg_arn}
+            ],
         )
-        listener_arn = listener_resp['Listeners'][0]['ListenerArn']
-        print(f"  Listener criado (default → general_api)")
+        listener_arn = listener_resp["Listeners"][0]["ListenerArn"]
+        print("  Listener criado (default → general_api)")
     else:
-        print(f"  Listener já existe.")
+        print("  Listener já existe.")
 
     # 4. Criar routing rules para os simuladores
-    existing_rules = elbv2_client.describe_rules(ListenerArn=listener_arn)['Rules']
-    existing_priorities = {r.get('Priority') for r in existing_rules}
+    existing_rules = elbv2_client.describe_rules(ListenerArn=listener_arn)[
+        "Rules"
+    ]
+    existing_priorities = {r.get("Priority") for r in existing_rules}
 
     for sim_key, sim_config in SIMULATORS.items():
         if sim_config["TYPE"] != "service":
@@ -406,9 +481,9 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
 
         elbv2_client.create_rule(
             ListenerArn=listener_arn,
-            Conditions=[{'Field': 'path-pattern', 'Values': patterns}],
+            Conditions=[{"Field": "path-pattern", "Values": patterns}],
             Priority=priority,
-            Actions=[{'Type': 'forward', 'TargetGroupArn': tg_arns[sim_key]}]
+            Actions=[{"Type": "forward", "TargetGroupArn": tg_arns[sim_key]}],
         )
         print(f"  Rule prioridade {priority}: {patterns} → {sim_key}")
 
@@ -418,41 +493,50 @@ def setup_internal_alb(vpc_id: str, subnet_ids: list[str],
 def setup_auto_scaling(sim_key: str, service_name: str):
     """Configura o Application Auto Scaling para um ECS Service."""
     try:
-        app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION)
-        
+        app_autoscaling = boto3.client(
+            "application-autoscaling", region_name=AWS_REGION
+        )
+
         # Para o sim_pedidos, min=0 (pois controlamos no dash), pros outros min=1
         min_cap = 0 if sim_key == "sim_pedidos" else 1
 
         app_autoscaling.register_scalable_target(
-            ServiceNamespace='ecs',
-            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-            ScalableDimension='ecs:service:DesiredCount',
+            ServiceNamespace="ecs",
+            ResourceId=f"service/{CLUSTER_NAME}/{service_name}",
+            ScalableDimension="ecs:service:DesiredCount",
             MinCapacity=min_cap,
-            MaxCapacity=15
+            MaxCapacity=15,
         )
-        
+
         app_autoscaling.put_scaling_policy(
-            ServiceNamespace='ecs',
-            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-            ScalableDimension='ecs:service:DesiredCount',
-            PolicyName=f'{service_name}-cpu-autoscaling',
-            PolicyType='TargetTrackingScaling',
+            ServiceNamespace="ecs",
+            ResourceId=f"service/{CLUSTER_NAME}/{service_name}",
+            ScalableDimension="ecs:service:DesiredCount",
+            PolicyName=f"{service_name}-cpu-autoscaling",
+            PolicyType="TargetTrackingScaling",
             TargetTrackingScalingPolicyConfiguration={
-                'TargetValue': 25.0, # Target agressivo pra escalar rápido nos eventos
-                'PredefinedMetricSpecification': {
-                    'PredefinedMetricType': 'ECSServiceAverageCPUUtilization'
+                "TargetValue": 25.0,  # Target agressivo pra escalar rápido nos eventos
+                "PredefinedMetricSpecification": {
+                    "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
                 },
-                'ScaleOutCooldown': 15,
-                'ScaleInCooldown': 60
-            }
+                "ScaleOutCooldown": 15,
+                "ScaleInCooldown": 60,
+            },
         )
-        print(f"  [{sim_key}] Auto Scaling configurado (CPU Alvo: 25.0%, Máx: 15).")
+        print(
+            f"  [{sim_key}] Auto Scaling configurado (CPU Alvo: 25.0%, Máx: 15)."
+        )
     except Exception as e:
         print(f"  [{sim_key}] Aviso: Falha ao configurar Auto Scaling: {e}")
 
 
-def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
-                        subnet_ids: list[str], tg_arn: str | None = None):
+def create_ecs_service(
+    sim_key: str,
+    sim_config: dict,
+    sg_id: str,
+    subnet_ids: list[str],
+    tg_arn: str | None = None,
+):
     """Cria um ECS Service, opcionalmente ligado a um Target Group."""
     service_name = sim_config["SERVICE_NAME"]
     task_family = sim_config["TASK_FAMILY"]
@@ -462,22 +546,29 @@ def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
 
     lb_config = []
     if tg_arn and "CONTAINER_PORT" in sim_config:
-        lb_config = [{
-            "targetGroupArn": tg_arn,
-            "containerName": sim_config["CONTAINER_NAME"],
-            "containerPort": sim_config["CONTAINER_PORT"]
-        }]
+        lb_config = [
+            {
+                "targetGroupArn": tg_arn,
+                "containerName": sim_config["CONTAINER_NAME"],
+                "containerPort": sim_config["CONTAINER_PORT"],
+            }
+        ]
 
     # Verifica se já existe
     try:
-        response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
-        if response['services'] and response['services'][0]['status'] != 'INACTIVE':
+        response = ecs_client.describe_services(
+            cluster=CLUSTER_NAME, services=[service_name]
+        )
+        if (
+            response["services"]
+            and response["services"][0]["status"] != "INACTIVE"
+        ):
             print(f"  [{sim_key}] Service já existe. Atualizando.")
             ecs_client.update_service(
                 cluster=CLUSTER_NAME,
                 service=service_name,
                 taskDefinition=task_family,
-                forceNewDeployment=True
+                forceNewDeployment=True,
             )
             setup_auto_scaling(sim_key, service_name)
             return
@@ -495,20 +586,20 @@ def create_ecs_service(sim_key: str, sim_config: dict, sg_id: str,
                 "awsvpcConfiguration": {
                     "subnets": subnet_ids,
                     "securityGroups": [sg_id],
-                    "assignPublicIp": "ENABLED"
+                    "assignPublicIp": "ENABLED",
                 }
             },
             loadBalancers=lb_config,
         )
         print(f"  [{sim_key}] Service criado.")
     except ClientError as e:
-        if 'already exists' in str(e):
+        if "already exists" in str(e):
             print(f"  [{sim_key}] Service já existe (via catch). Atualizando.")
             ecs_client.update_service(
                 cluster=CLUSTER_NAME,
                 service=service_name,
                 taskDefinition=task_family,
-                forceNewDeployment=True
+                forceNewDeployment=True,
             )
         else:
             raise e
@@ -551,9 +642,9 @@ def deploy():
     print(f"  Criando/Verificando cluster: {CLUSTER_NAME}")
     try:
         ecs_client.create_cluster(clusterName=CLUSTER_NAME)
-        print(f"  Cluster criado.")
+        print("  Cluster criado.")
     except Exception:
-        print(f"  Cluster já existe.")
+        print("  Cluster já existe.")
     print()
 
     # 5. Build & Push de todas as imagens
@@ -565,13 +656,17 @@ def deploy():
     for sim_key, sim_config in SIMULATORS.items():
         print()
         print(f"  |- {sim_config['DESCRIPTION']} ({sim_key})")
-        print(f"  |  Tipo: {'ECS Service' if sim_config['TYPE'] == 'service' else 'ECS Task (batch)'}")
+        print(
+            f"  |  Tipo: {'ECS Service' if sim_config['TYPE'] == 'service' else 'ECS Task (batch)'}"
+        )
         ecr_uris[sim_key] = build_and_push_image(sim_key, sim_config)
-        print(f"  |_ Imagem pronta!")
+        print("  |_ Imagem pronta!")
     print()
 
     # 6. Criar ALB interno + Target Groups + Routing Rules
-    sim_alb_dns, sim_alb_arn, tg_arns = setup_internal_alb(vpc_id, subnet_ids, sg_id)
+    sim_alb_dns, sim_alb_arn, tg_arns = setup_internal_alb(
+        vpc_id, subnet_ids, sg_id
+    )
     sim_alb_url = f"http://{sim_alb_dns}"
     print()
 
@@ -580,7 +675,9 @@ def deploy():
     for sim_key, sim_config in SIMULATORS.items():
         env_mapping = sim_config.get("ENV_MAPPING", {})
         env_vars = resolve_env_vars(env_mapping, deploy_output, sim_alb_url)
-        register_task_definition(sim_key, sim_config, ecr_uris[sim_key], env_vars, role_arn)
+        register_task_definition(
+            sim_key, sim_config, ecr_uris[sim_key], env_vars, role_arn
+        )
     print()
 
     # 8. Criar ECS Services (com Load Balancer)
@@ -595,36 +692,43 @@ def deploy():
     active_services = [
         sim_config["SERVICE_NAME"]
         for sim_config in SIMULATORS.values()
-        if sim_config["TYPE"] == "service" and sim_config.get("DESIRED_COUNT", 1) > 0
+        if sim_config["TYPE"] == "service"
+        and sim_config.get("DESIRED_COUNT", 1) > 0
     ]
     if active_services:
         print("--- Aguardando Services ficarem acessíveis ---")
         print(f"  Services: {', '.join(active_services)}")
-        
+
         all_ready = False
         for attempt in range(40):
-            response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=active_services)
+            response = ecs_client.describe_services(
+                cluster=CLUSTER_NAME, services=active_services
+            )
             ready_count = 0
-            
-            for svc in response['services']:
-                desired = svc['desiredCount']
-                running = svc.get('runningCount', 0)
-                
+
+            for svc in response["services"]:
+                desired = svc["desiredCount"]
+                running = svc.get("runningCount", 0)
+
                 # Ignoramos deployments extras drenando, o que importa é ter as tasks desejadas rodando
                 if running >= desired and desired > 0:
                     ready_count += 1
-                    
+
             if ready_count == len(active_services):
                 all_ready = True
                 print("  ✓ Todas as tasks dos services estão rodando!")
                 break
-                
-            print(f"  Aguardando... tentativa {attempt + 1}/40. Alguns services ainda estão subindo.")
+
+            print(
+                f"  Aguardando... tentativa {attempt + 1}/40. Alguns services ainda estão subindo."
+            )
             time.sleep(15)
 
         if not all_ready:
             print("  ⚠️ Timeout aguardando services.")
-            print("  Os services podem ainda estar subindo ou drenando. Verifique o AWS ECS console.")
+            print(
+                "  Os services podem ainda estar subindo ou drenando. Verifique o AWS ECS console."
+            )
     print()
 
     # 10. Salvar output
@@ -636,7 +740,7 @@ def deploy():
         "SIM_ALB_DNS": sim_alb_dns,
         "SIM_ALB_ARN": sim_alb_arn,
         "SIM_ALB_URL": sim_alb_url,
-        "SIMULATORS": {}
+        "SIMULATORS": {},
     }
     for sim_key, sim_config in SIMULATORS.items():
         sim_output["SIMULATORS"][sim_key] = {
@@ -689,40 +793,48 @@ def destroy():
                 )
                 print(f"  Service {service_name} deletado.")
             except Exception:
-                print(f"  Service {service_name} não encontrado ou já deletado.")
+                print(
+                    f"  Service {service_name} não encontrado ou já deletado."
+                )
 
     # 2. Parar tasks em execução
     print("--- Parando Tasks em execução ---")
     try:
-        task_arns = ecs_client.list_tasks(cluster=CLUSTER_NAME)['taskArns']
+        task_arns = ecs_client.list_tasks(cluster=CLUSTER_NAME)["taskArns"]
         for task_arn in task_arns:
-            ecs_client.stop_task(cluster=CLUSTER_NAME, task=task_arn, reason="Destroy simulators")
+            ecs_client.stop_task(
+                cluster=CLUSTER_NAME,
+                task=task_arn,
+                reason="Destroy simulators",
+            )
         if task_arns:
             print(f"  {len(task_arns)} tasks paradas.")
         else:
-            print(f"  Nenhuma task em execução.")
+            print("  Nenhuma task em execução.")
     except Exception:
-        print(f"  Nenhuma task encontrada.")
+        print("  Nenhuma task encontrada.")
 
     # 3. Remover ALB
     print("--- Removendo ALB ---")
     try:
         albs = elbv2_client.describe_load_balancers(Names=[SIM_ALB_NAME])
-        alb_arn = albs['LoadBalancers'][0]['LoadBalancerArn']
+        alb_arn = albs["LoadBalancers"][0]["LoadBalancerArn"]
 
         # Deletar listeners primeiro
-        listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
+        listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)[
+            "Listeners"
+        ]
         for listener in listeners:
-            elbv2_client.delete_listener(ListenerArn=listener['ListenerArn'])
+            elbv2_client.delete_listener(ListenerArn=listener["ListenerArn"])
         if listeners:
             print(f"  {len(listeners)} listener(s) removido(s).")
 
         # Deletar ALB
         elbv2_client.delete_load_balancer(LoadBalancerArn=alb_arn)
         print(f"  ALB {SIM_ALB_NAME} deletado. Aguardando...")
-        waiter = elbv2_client.get_waiter('load_balancers_deleted')
+        waiter = elbv2_client.get_waiter("load_balancers_deleted")
         waiter.wait(LoadBalancerArns=[alb_arn])
-        print(f"  ALB removido com sucesso.")
+        print("  ALB removido com sucesso.")
     except Exception:
         print(f"  ALB {SIM_ALB_NAME} não encontrado ou já deletado.")
 
@@ -736,8 +848,10 @@ def destroy():
             continue
         try:
             tgs = elbv2_client.describe_target_groups(Names=[tg_name])
-            for tg in tgs['TargetGroups']:
-                elbv2_client.delete_target_group(TargetGroupArn=tg['TargetGroupArn'])
+            for tg in tgs["TargetGroups"]:
+                elbv2_client.delete_target_group(
+                    TargetGroupArn=tg["TargetGroupArn"]
+                )
                 print(f"  TG {tg_name} deletado.")
         except Exception:
             print(f"  TG {tg_name} não encontrado.")
@@ -748,7 +862,7 @@ def destroy():
         ecs_client.delete_cluster(cluster=CLUSTER_NAME)
         print(f"  Cluster {CLUSTER_NAME} deletado.")
     except Exception:
-        print(f"  Cluster não encontrado ou já deletado.")
+        print("  Cluster não encontrado ou já deletado.")
 
     # 6. Deletar repositórios ECR
     print("--- Removendo Repositórios ECR ---")
@@ -766,7 +880,7 @@ def destroy():
         logs_client.delete_log_group(logGroupName=LOG_GROUP_NAME)
         print(f"  Log Group {LOG_GROUP_NAME} deletado.")
     except Exception:
-        print(f"  Log Group não encontrado.")
+        print("  Log Group não encontrado.")
 
     # 8. Deletar Security Group
     print("--- Removendo Security Group ---")
@@ -776,8 +890,8 @@ def destroy():
             print(f"  SG {SG_NAME} deletado.")
             break
         except ClientError as e:
-            if e.response['Error']['Code'] == 'InvalidGroup.NotFound':
-                print(f"  SG não encontrado.")
+            if e.response["Error"]["Code"] == "InvalidGroup.NotFound":
+                print("  SG não encontrado.")
                 break
             print(f"  Tentativa {attempt + 1}/5: SG ainda em uso...")
             time.sleep(10)
@@ -797,8 +911,14 @@ def destroy():
 # MAIN
 # =========================================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Deploy/Destroy cluster de simuladores DijkFood")
-    parser.add_argument("--destroy", action="store_true", help="Destrói toda infraestrutura de simuladores")
+    parser = argparse.ArgumentParser(
+        description="Deploy/Destroy cluster de simuladores DijkFood"
+    )
+    parser.add_argument(
+        "--destroy",
+        action="store_true",
+        help="Destrói toda infraestrutura de simuladores",
+    )
     args = parser.parse_args()
 
     if args.destroy:
