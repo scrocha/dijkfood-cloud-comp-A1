@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import logging
 import math
 import os
-import random
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -95,10 +96,15 @@ SIM_COURIER_URL = os.getenv("SIM_COURIER_URL")
 TIMEOUT_DB_S = float(os.getenv("TIMEOUT_DB_S", "10"))
 TIMEOUT_ORDER_S = float(os.getenv("TIMEOUT_ORDER_S", "10"))
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("general_api")
+
 # Caches para performance
 CACHE_USUARIOS = {}
 CACHE_RESTAURANTES = {}
-CACHE_ENTREGADORES_LIVRES = {"data": [], "timestamp": 0.0}
 
 # --- Utilitários ---
 
@@ -154,6 +160,38 @@ def _interpolate_route(lat1, lon1, lat2, lon2, num_points=5):
     ]
 
 
+def _service_label_from_url(url: str) -> str:
+    if url.startswith(DATABASE_SERVICE_URL):
+        return "database"
+    if url.startswith(ORDER_SERVICE_URL):
+        return "order"
+    if SIM_RESTAURANT_URL and url.startswith(SIM_RESTAURANT_URL.rstrip("/")):
+        return "sim_restaurante"
+    if SIM_COURIER_URL and url.startswith(SIM_COURIER_URL.rstrip("/")):
+        return "sim_entregadores"
+    if ROUTE_SERVICE_URL and url.startswith(ROUTE_SERVICE_URL):
+        return "route"
+    return "external"
+
+
+def _log_checkout_step(
+    trace_id: str,
+    step: str,
+    started: float,
+    status: str = "ok",
+    detail: str = "",
+):
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    logger.info(
+        "checkout_step trace=%s step=%s status=%s duration_ms=%.2f detail=%s",
+        trace_id,
+        step,
+        status,
+        elapsed_ms,
+        detail,
+    )
+
+
 async def _request_json(
     client: httpx.AsyncClient,
     method: str,
@@ -162,8 +200,18 @@ async def _request_json(
     timeout_s: float,
     json: Any | None = None,
 ) -> Any:
+    started = time.perf_counter()
     try:
         resp = await client.request(method, url, json=json, timeout=timeout_s)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "downstream_call service=%s method=%s url=%s status=%s duration_ms=%.2f",
+            _service_label_from_url(url),
+            method,
+            url,
+            resp.status_code,
+            elapsed_ms,
+        )
         if resp.status_code >= 400:
             print(
                 f"[Gateway] Erro {resp.status_code} em {url}: {resp.text[:100]}"
@@ -173,6 +221,15 @@ async def _request_json(
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "downstream_call service=%s method=%s url=%s status=error duration_ms=%.2f error=%s",
+            _service_label_from_url(url),
+            method,
+            url,
+            elapsed_ms,
+            str(e),
+        )
         print(f"[Gateway] Falha na requisição {url}: {str(e)}")
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -300,6 +357,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DijkFood - API Geral", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", request.url.path)
+        logger.info(
+            "api_request method=%s path=%s status=%s duration_ms=%.2f",
+            request.method,
+            route_path,
+            status_code,
+            elapsed_ms,
+        )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -352,8 +432,13 @@ async def checkout(body: CheckoutRequest):
     sim_rest = _require_http_base_url("SIM_RESTAURANT_URL", SIM_RESTAURANT_URL)
     sim_cour = _require_http_base_url("SIM_COURIER_URL", SIM_COURIER_URL)
     client = app.state.http
+    checkout_trace = (
+        f"checkout-{int(time.time() * 1000)}-"
+        f"{body.customer_id[-6:]}-{body.restaurant_id[-6:]}"
+    )
 
     # Cache de metadados
+    fetch_customer_started = time.perf_counter()
     if body.customer_id not in CACHE_USUARIOS:
         CACHE_USUARIOS[body.customer_id] = await _request_json(
             client,
@@ -361,6 +446,11 @@ async def checkout(body: CheckoutRequest):
             f"{DATABASE_SERVICE_URL}/cadastro/usuarios/{body.customer_id}",
             timeout_s=5,
         )
+    _log_checkout_step(
+        checkout_trace, "fetch_customer", fetch_customer_started
+    )
+
+    fetch_restaurant_started = time.perf_counter()
     if body.restaurant_id not in CACHE_RESTAURANTES:
         CACHE_RESTAURANTES[body.restaurant_id] = await _request_json(
             client,
@@ -368,11 +458,15 @@ async def checkout(body: CheckoutRequest):
             f"{DATABASE_SERVICE_URL}/cadastro/restaurantes/{body.restaurant_id}",
             timeout_s=5,
         )
+    _log_checkout_step(
+        checkout_trace, "fetch_restaurant", fetch_restaurant_started
+    )
 
     u_lat, u_lon = _coerce_lat_lon(CACHE_USUARIOS[body.customer_id])
     r_lat, r_lon = _coerce_lat_lon(CACHE_RESTAURANTES[body.restaurant_id])
 
     # Criar pedido
+    create_order_started = time.perf_counter()
     pedido = await _request_json(
         client,
         "POST",
@@ -386,20 +480,28 @@ async def checkout(body: CheckoutRequest):
         },
     )
     order_id = pedido["order_id"]
+    _log_checkout_step(
+        checkout_trace,
+        "create_order",
+        create_order_started,
+        detail=f"order_id={order_id}",
+    )
 
-    # Atribuir entregador com cache e randomizacao
-    now = asyncio.get_event_loop().time()
-    if now - CACHE_ENTREGADORES_LIVRES["timestamp"] > 1.5:
-        drivers = await _request_json(
-            client,
-            "GET",
-            f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free?limit=50",
-            timeout_s=5,
-        )
-        CACHE_ENTREGADORES_LIVRES["data"] = drivers
-        CACHE_ENTREGADORES_LIVRES["timestamp"] = now
+    # Atribuir entregador a partir do cache compartilhado do serviço de pedidos
+    fetch_drivers_started = time.perf_counter()
+    drivers = await _request_json(
+        client,
+        "GET",
+        f"{ORDER_SERVICE_URL}/pedidos/drivers/status/free?limit=50",
+        timeout_s=5,
+    )
+    _log_checkout_step(
+        checkout_trace,
+        "fetch_free_drivers",
+        fetch_drivers_started,
+        detail=f"count={len(drivers) if isinstance(drivers, list) else 0}",
+    )
 
-    drivers = CACHE_ENTREGADORES_LIVRES["data"]
     if not drivers:
         raise HTTPException(status_code=503, detail="Sem entregadores")
 
@@ -416,17 +518,52 @@ async def checkout(body: CheckoutRequest):
             }
         )
     candidates.sort(key=lambda x: x["dist"])
-    chosen = random.choice(candidates[:15])
+    if not candidates:
+        raise HTTPException(
+            status_code=503, detail="Sem entregadores candidatos"
+        )
 
-    await _request_json(
-        client,
-        "PATCH",
-        f"{ORDER_SERVICE_URL}/pedidos/orders/{order_id}/status",
-        timeout_s=5,
-        json={"status": "PREPARING", "entregador_id": chosen["id"]},
-    )
+    chosen = None
+    assign_started = time.perf_counter()
+    last_error = None
+    for candidate in candidates[:10]:
+        try:
+            await _request_json(
+                client,
+                "PATCH",
+                f"{ORDER_SERVICE_URL}/pedidos/orders/{order_id}/status",
+                timeout_s=5,
+                json={"status": "PREPARING", "entregador_id": candidate["id"]},
+            )
+            chosen = candidate
+            _log_checkout_step(
+                checkout_trace,
+                "assign_driver",
+                assign_started,
+                detail=f"driver_id={candidate['id']}",
+            )
+            break
+        except HTTPException as exc:
+            last_error = exc
+            _log_checkout_step(
+                checkout_trace,
+                "assign_driver",
+                assign_started,
+                status="retry",
+                detail=f"driver_id={candidate['id']} status={exc.status_code}",
+            )
+            assign_started = time.perf_counter()
+            continue
+
+    if not chosen:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Sem entregadores disponíveis ({last_error.detail if isinstance(last_error, HTTPException) else 'indisponível'})",
+        )
 
     # Notifica simuladores (async)
+    notify_started = time.perf_counter()
+
     async def notify():
         try:
             route_to_client = _interpolate_route(r_lat, r_lon, u_lat, u_lon, 5)
@@ -458,6 +595,7 @@ async def checkout(body: CheckoutRequest):
             pass
 
     asyncio.create_task(notify())
+    _log_checkout_step(checkout_trace, "notify_simulators", notify_started)
     return {"order_id": order_id, "courier_id": chosen["id"]}
 
 
