@@ -14,13 +14,16 @@ Uso:
     uv run streamlit run simulador_ecs/dashboard_carga.py
 """
 
-import streamlit as st
-import boto3
 import json
-import time
 import re
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+import boto3
+import streamlit as st
 from botocore.exceptions import ClientError
 
 # =========================================================================
@@ -30,7 +33,7 @@ st.set_page_config(
     page_title="DijkFood — Simuladores",
     page_icon="🚀",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -75,15 +78,15 @@ def load_simulator_output():
 config = load_config()
 sim_output = load_simulator_output()
 
-AWS_REGION = config['AWS_REGION']
-CLUSTER_NAME = config['CLUSTER_NAME']
-LOG_GROUP_NAME = config['LOG_GROUP_NAME']
-SIMULATORS = config['SIMULATORS']
+AWS_REGION = config["AWS_REGION"]
+CLUSTER_NAME = config["CLUSTER_NAME"]
+LOG_GROUP_NAME = config["LOG_GROUP_NAME"]
+SIMULATORS = config["SIMULATORS"]
 
 # Clientes Boto3
-ecs_client = boto3.client('ecs', region_name=AWS_REGION)
-ec2_client = boto3.client('ec2', region_name=AWS_REGION)
-logs_client = boto3.client('logs', region_name=AWS_REGION)
+ecs_client = boto3.client("ecs", region_name=AWS_REGION)
+ec2_client = boto3.client("ec2", region_name=AWS_REGION)
+logs_client = boto3.client("logs", region_name=AWS_REGION)
 
 # Ícones por simulador
 SIM_ICONS = {
@@ -93,6 +96,15 @@ SIM_ICONS = {
     "sim_entregadores": "🏍️",
     "sim_completo": "⚡",
 }
+
+
+ACTIVE_ORDER_STATUSES = [
+    "CONFIRMED",
+    "PREPARING",
+    "READY_FOR_PICKUP",
+    "PICKED_UP",
+    "IN_TRANSIT",
+]
 
 
 # =========================================================================
@@ -107,16 +119,22 @@ def get_network_config():
         return sg_id, subnet_ids
 
     try:
-        sgs = ec2_client.describe_security_groups(GroupNames=[config['SG_NAME']])
-        sg_id = sgs['SecurityGroups'][0]['GroupId']
+        sgs = ec2_client.describe_security_groups(
+            GroupNames=[config["SG_NAME"]]
+        )
+        sg_id = sgs["SecurityGroups"][0]["GroupId"]
     except Exception:
         sg_id = None
 
     try:
-        vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-        vpc_id = vpcs['Vpcs'][0]['VpcId']
-        subnets = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
-        subnet_ids = [s['SubnetId'] for s in subnets['Subnets'][:2]]
+        vpcs = ec2_client.describe_vpcs(
+            Filters=[{"Name": "isDefault", "Values": ["true"]}]
+        )
+        vpc_id = vpcs["Vpcs"][0]["VpcId"]
+        subnets = ec2_client.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+        )
+        subnet_ids = [s["SubnetId"] for s in subnets["Subnets"][:2]]
     except Exception:
         subnet_ids = []
 
@@ -126,10 +144,12 @@ def get_network_config():
 def list_running_tasks():
     """Lista tasks em execução no cluster de simuladores."""
     try:
-        task_arns = ecs_client.list_tasks(cluster=CLUSTER_NAME)['taskArns']
+        task_arns = ecs_client.list_tasks(cluster=CLUSTER_NAME)["taskArns"]
         if not task_arns:
             return []
-        tasks = ecs_client.describe_tasks(cluster=CLUSTER_NAME, tasks=task_arns)['tasks']
+        tasks = ecs_client.describe_tasks(
+            cluster=CLUSTER_NAME, tasks=task_arns
+        )["tasks"]
         return tasks
     except Exception:
         return []
@@ -138,14 +158,19 @@ def list_running_tasks():
 def get_service_info(service_name: str):
     """Retorna info do service (desiredCount, runningCount, status)."""
     try:
-        response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
-        if response['services'] and response['services'][0]['status'] != 'INACTIVE':
-            svc = response['services'][0]
+        response = ecs_client.describe_services(
+            cluster=CLUSTER_NAME, services=[service_name]
+        )
+        if (
+            response["services"]
+            and response["services"][0]["status"] != "INACTIVE"
+        ):
+            svc = response["services"][0]
             return {
-                "status": svc['status'],
-                "desiredCount": svc['desiredCount'],
-                "runningCount": svc['runningCount'],
-                "pendingCount": svc['pendingCount'],
+                "status": svc["status"],
+                "desiredCount": svc["desiredCount"],
+                "runningCount": svc["runningCount"],
+                "pendingCount": svc["pendingCount"],
             }
     except Exception:
         pass
@@ -159,7 +184,7 @@ def scale_service(service_name: str, task_family: str, desired_count: int):
             cluster=CLUSTER_NAME,
             service=service_name,
             taskDefinition=task_family,
-            desiredCount=desired_count
+            desiredCount=desired_count,
         )
         return True
     except Exception as e:
@@ -167,34 +192,37 @@ def scale_service(service_name: str, task_family: str, desired_count: int):
         return False
 
 
-def update_service_rate(service_name: str, task_family: str,
-                        container_name: str, new_rate: float):
+def update_service_rate(
+    service_name: str, task_family: str, container_name: str, new_rate: float
+):
     """Atualiza o RATE no task definition e força novo deploy do service."""
     try:
         # 1. Buscar task definition atual
-        td = ecs_client.describe_task_definition(taskDefinition=task_family)['taskDefinition']
+        td = ecs_client.describe_task_definition(taskDefinition=task_family)[
+            "taskDefinition"
+        ]
 
         # 2. Atualizar env vars RATE e AUTO_START no container
-        for container in td['containerDefinitions']:
-            if container['name'] == container_name:
-                env_list = container.get('environment', [])
-                env_dict = {e['name']: e['value'] for e in env_list}
-                env_dict['RATE'] = str(new_rate)
-                env_dict['AUTO_START'] = 'true'
-                container['environment'] = [
-                    {'name': k, 'value': v} for k, v in env_dict.items()
+        for container in td["containerDefinitions"]:
+            if container["name"] == container_name:
+                env_list = container.get("environment", [])
+                env_dict = {e["name"]: e["value"] for e in env_list}
+                env_dict["RATE"] = str(new_rate)
+                env_dict["AUTO_START"] = "true"
+                container["environment"] = [
+                    {"name": k, "value": v} for k, v in env_dict.items()
                 ]
 
         # 3. Registrar nova revisão da task definition
         ecs_client.register_task_definition(
             family=task_family,
-            networkMode=td['networkMode'],
-            requiresCompatibilities=td['requiresCompatibilities'],
-            cpu=td['cpu'],
-            memory=td['memory'],
-            executionRoleArn=td['executionRoleArn'],
-            taskRoleArn=td.get('taskRoleArn', ''),
-            containerDefinitions=td['containerDefinitions'],
+            networkMode=td["networkMode"],
+            requiresCompatibilities=td["requiresCompatibilities"],
+            cpu=td["cpu"],
+            memory=td["memory"],
+            executionRoleArn=td["executionRoleArn"],
+            taskRoleArn=td.get("taskRoleArn", ""),
+            containerDefinitions=td["containerDefinitions"],
         )
 
         # 4. Forçar novo deploy do service
@@ -210,13 +238,20 @@ def update_service_rate(service_name: str, task_family: str,
         return False
 
 
-def run_ecs_task(sim_key: str, sim_config: dict, count: int,
-                 api_url: str, extra_env: list[dict] = None,
-                 cmd_override: list[str] = None):
+def run_ecs_task(
+    sim_key: str,
+    sim_config: dict,
+    count: int,
+    api_url: str,
+    extra_env: list[dict] = None,
+    cmd_override: list[str] = None,
+):
     """Dispara N tasks do simulador especificado."""
     sg_id, subnet_ids = get_network_config()
     if not sg_id or not subnet_ids:
-        st.error("Não foi possível obter SG ID ou Subnets. Verifique se o deploy foi executado.")
+        st.error(
+            "Não foi possível obter SG ID ou Subnets. Verifique se o deploy foi executado."
+        )
         return None
 
     # Montar env vars
@@ -224,34 +259,38 @@ def run_ecs_task(sim_key: str, sim_config: dict, count: int,
     sim_alb_url = sim_output.get("SIM_ALB_URL", "")
     env_vars = []
     for key, value in env_mapping.items():
-        resolved = value.replace("{API_URL}", api_url).replace("{SIM_ALB_URL}", sim_alb_url)
+        resolved = value.replace("{API_URL}", api_url).replace(
+            "{SIM_ALB_URL}", sim_alb_url
+        )
         env_vars.append({"name": key, "value": resolved})
     if extra_env:
         env_vars.extend(extra_env)
 
     overrides = {
-        'containerOverrides': [{
-            'name': sim_config['CONTAINER_NAME'],
-            'environment': env_vars,
-        }]
+        "containerOverrides": [
+            {
+                "name": sim_config["CONTAINER_NAME"],
+                "environment": env_vars,
+            }
+        ]
     }
 
     if cmd_override:
-        overrides['containerOverrides'][0]['command'] = cmd_override
+        overrides["containerOverrides"][0]["command"] = cmd_override
 
     response = ecs_client.run_task(
         cluster=CLUSTER_NAME,
-        taskDefinition=sim_config['TASK_FAMILY'],
+        taskDefinition=sim_config["TASK_FAMILY"],
         count=count,
-        launchType='FARGATE',
+        launchType="FARGATE",
         networkConfiguration={
-            'awsvpcConfiguration': {
-                'subnets': subnet_ids,
-                'securityGroups': [sg_id],
-                'assignPublicIp': 'ENABLED'
+            "awsvpcConfiguration": {
+                "subnets": subnet_ids,
+                "securityGroups": [sg_id],
+                "assignPublicIp": "ENABLED",
             }
         },
-        overrides=overrides
+        overrides=overrides,
     )
     return response
 
@@ -264,8 +303,8 @@ def stop_all_tasks():
         try:
             ecs_client.stop_task(
                 cluster=CLUSTER_NAME,
-                task=task['taskArn'],
-                reason="Parado via Dashboard"
+                task=task["taskArn"],
+                reason="Parado via Dashboard",
             )
             stopped += 1
         except Exception:
@@ -273,41 +312,129 @@ def stop_all_tasks():
     return stopped
 
 
-def fetch_logs(stream_prefix: str, limit_streams: int = 3, limit_events: int = 30):
+def _http_get_json(url: str, timeout_s: float = 5.0):
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        data = resp.read().decode("utf-8")
+        return json.loads(data) if data else None
+
+
+def get_active_orders(api_url: str, sim_alb_url: str = "") -> dict:
+    """Obtém a contagem de pedidos ativos.
+
+    Preferência: endpoint do general_api no ALB dos simuladores.
+    Fallback: consulta direta no Order Service via ALB principal.
+    """
+    sim_alb_url = (sim_alb_url or "").rstrip("/")
+    api_url = (api_url or "").rstrip("/")
+
+    if sim_alb_url:
+        try:
+            res = _http_get_json(
+                f"{sim_alb_url}/admin/active-orders", timeout_s=5.0
+            )
+            if isinstance(res, dict) and "total_active" in res:
+                return res
+        except Exception:
+            pass
+
+    by_status = {}
+    total = 0
+    if not api_url:
+        return {"total_active": 0, "by_status": {}}
+
+    for status in ACTIVE_ORDER_STATUSES:
+        try:
+            res = _http_get_json(
+                f"{api_url}/pedidos/orders/status/{status}", timeout_s=5.0
+            )
+            count = len(res) if isinstance(res, list) else 0
+        except Exception:
+            count = 0
+        by_status[status] = count
+        total += count
+
+    return {"total_active": total, "by_status": by_status}
+
+
+def wait_for_no_active_orders(
+    api_url: str, sim_alb_url: str = "", poll_s: float = 5.0
+):
+    placeholder = st.empty()
+    while True:
+        info = get_active_orders(api_url, sim_alb_url)
+        total = int(info.get("total_active") or 0)
+        by_status = info.get("by_status") or {}
+
+        if total <= 0:
+            placeholder.success(
+                "✅ Nenhum pedido ativo. Pode parar os simuladores com segurança."
+            )
+            return
+
+        details = " | ".join(
+            f"{k}={int(v)}" for k, v in by_status.items() if int(v) > 0
+        )
+        placeholder.warning(
+            f"⏳ Aguardando {total} pedido(s) ativo(s) finalizarem… {details}"
+        )
+        time.sleep(poll_s)
+
+
+def graceful_scale_down(
+    sim_key: str, sim_config: dict, *, api_url: str, sim_alb_url: str
+):
+    """Escala um simulador para 0 após drenar pedidos ativos."""
+    # Para evitar loop infinito de pedidos chegando, tenta parar o sim_pedidos antes.
+    sim_pedidos = SIMULATORS.get("sim_pedidos")
+    if sim_pedidos:
+        svc = get_service_info(sim_pedidos["SERVICE_NAME"])
+        if svc and svc.get("desiredCount", 0) > 0:
+            scale_service(
+                sim_pedidos["SERVICE_NAME"], sim_pedidos["TASK_FAMILY"], 0
+            )
+
+    wait_for_no_active_orders(api_url, sim_alb_url)
+    return scale_service(
+        sim_config["SERVICE_NAME"], sim_config["TASK_FAMILY"], 0
+    )
+
+
+def fetch_logs(
+    stream_prefix: str, limit_streams: int = 3, limit_events: int = 30
+):
     """Busca logs do CloudWatch filtrados por stream prefix."""
     try:
         response = logs_client.describe_log_streams(
-            logGroupName=LOG_GROUP_NAME,
-            logStreamNamePrefix=stream_prefix
+            logGroupName=LOG_GROUP_NAME, logStreamNamePrefix=stream_prefix
         )
 
-        streams = response.get('logStreams', [])
+        streams = response.get("logStreams", [])
         if not streams:
             return None
 
         # Ordenar os streams pelo último evento (mais recente primeiro)
-        streams.sort(key=lambda x: x.get('lastEventTimestamp', 0), reverse=True)
+        streams.sort(
+            key=lambda x: x.get("lastEventTimestamp", 0), reverse=True
+        )
         streams = streams[:limit_streams]
 
         all_logs = []
         for stream in streams:
-            stream_name = stream['logStreamName']
+            stream_name = stream["logStreamName"]
             events_resp = logs_client.get_log_events(
                 logGroupName=LOG_GROUP_NAME,
                 logStreamName=stream_name,
                 limit=limit_events,
-                startFromHead=False
+                startFromHead=False,
             )
-            events = events_resp.get('events', [])
-            all_logs.append({
-                "stream": stream_name,
-                "events": events
-            })
+            events = events_resp.get("events", [])
+            all_logs.append({"stream": stream_name, "events": events})
 
         return all_logs
 
     except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceNotFoundException':
+        if e.response["Error"]["Code"] == "ResourceNotFoundException":
             return None
         raise
 
@@ -316,9 +443,9 @@ def check_cluster_exists():
     """Verifica se o cluster de simuladores existe."""
     try:
         response = ecs_client.describe_clusters(clusters=[CLUSTER_NAME])
-        clusters = response.get('clusters', [])
+        clusters = response.get("clusters", [])
         for c in clusters:
-            if c['status'] == 'ACTIVE':
+            if c["status"] == "ACTIVE":
                 return True
     except Exception:
         pass
@@ -330,27 +457,27 @@ def get_dynamo_counts(table_name="DijkfoodOrders"):
     Usa GSI Query otimizada (não Scan) para contar pedidos por status.
     """
     try:
-        dynamodb = boto3.client('dynamodb', region_name=AWS_REGION)
+        dynamodb = boto3.client("dynamodb", region_name=AWS_REGION)
 
         def count_gsi2pk(gsi2pk_value):
             response = dynamodb.query(
                 TableName=table_name,
-                IndexName='StatusIndex',
-                Select='COUNT',
-                KeyConditionExpression='GSI2PK = :gsi',
-                ExpressionAttributeValues={':gsi': {'S': gsi2pk_value}}
+                IndexName="StatusIndex",
+                Select="COUNT",
+                KeyConditionExpression="GSI2PK = :gsi",
+                ExpressionAttributeValues={":gsi": {"S": gsi2pk_value}},
             )
-            total = response.get('Count', 0)
-            while 'LastEvaluatedKey' in response:
+            total = response.get("Count", 0)
+            while "LastEvaluatedKey" in response:
                 response = dynamodb.query(
                     TableName=table_name,
-                    IndexName='StatusIndex',
-                    Select='COUNT',
-                    KeyConditionExpression='GSI2PK = :gsi',
-                    ExpressionAttributeValues={':gsi': {'S': gsi2pk_value}},
-                    ExclusiveStartKey=response['LastEvaluatedKey']
+                    IndexName="StatusIndex",
+                    Select="COUNT",
+                    KeyConditionExpression="GSI2PK = :gsi",
+                    ExpressionAttributeValues={":gsi": {"S": gsi2pk_value}},
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
                 )
-                total += response.get('Count', 0)
+                total += response.get("Count", 0)
             return total
 
         counts = {
@@ -363,7 +490,7 @@ def get_dynamo_counts(table_name="DijkfoodOrders"):
         }
         driver_counts = {
             "LIVRE": count_gsi2pk("DRIVER_STATUS#LIVRE"),
-            "EM_ENTREGA": count_gsi2pk("DRIVER_STATUS#EM_ENTREGA")
+            "EM_ENTREGA": count_gsi2pk("DRIVER_STATUS#EM_ENTREGA"),
         }
 
         return counts, driver_counts
@@ -383,28 +510,28 @@ def extract_p95_from_logs():
 
         # Percorre os eventos mais recentes procurando [METRICS]
         for log_entry in logs:
-            events = log_entry.get('events', [])
+            events = log_entry.get("events", [])
             for event in reversed(events):
-                msg = event.get('message', '')
-                if '[METRICS]' in msg:
+                msg = event.get("message", "")
+                if "[METRICS]" in msg:
                     # Parse: [METRICS] P95=123ms Avg=45ms | Rate=10/s | Sent=100 Err=2
                     result = {}
-                    p95_match = re.search(r'P95=(\d+)', msg)
-                    avg_match = re.search(r'Avg=(\d+)', msg)
-                    rate_match = re.search(r'Rate=(\d+)', msg)
-                    sent_match = re.search(r'Sent=(\d+)', msg)
-                    err_match = re.search(r'Err=(\d+)', msg)
+                    p95_match = re.search(r"P95=(\d+)", msg)
+                    avg_match = re.search(r"Avg=(\d+)", msg)
+                    rate_match = re.search(r"Rate=(\d+)", msg)
+                    sent_match = re.search(r"Sent=(\d+)", msg)
+                    err_match = re.search(r"Err=(\d+)", msg)
 
                     if p95_match:
-                        result['p95'] = int(p95_match.group(1))
+                        result["p95"] = int(p95_match.group(1))
                     if avg_match:
-                        result['avg'] = int(avg_match.group(1))
+                        result["avg"] = int(avg_match.group(1))
                     if rate_match:
-                        result['rate'] = int(rate_match.group(1))
+                        result["rate"] = int(rate_match.group(1))
                     if sent_match:
-                        result['sent'] = int(sent_match.group(1))
+                        result["sent"] = int(sent_match.group(1))
                     if err_match:
-                        result['errors'] = int(err_match.group(1))
+                        result["errors"] = int(err_match.group(1))
 
                     if result:
                         return result
@@ -416,7 +543,8 @@ def extract_p95_from_logs():
 # =========================================================================
 # CSS CUSTOMIZADO
 # =========================================================================
-st.markdown("""
+st.markdown(
+    """
 <style>
     .stApp {
         background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
@@ -473,7 +601,9 @@ st.markdown("""
         font-weight: 700;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # =========================================================================
@@ -486,8 +616,11 @@ with st.sidebar:
 
     # URL do ALB principal
     default_url = load_api_url()
-    api_url = st.text_input("🌐 URL Base APIs (ALB Principal)", value=default_url,
-                             help="Endereço do ALB das APIs de produção")
+    api_url = st.text_input(
+        "🌐 URL Base APIs (ALB Principal)",
+        value=default_url,
+        help="Endereço do ALB das APIs de produção",
+    )
 
     # URL do ALB interno dos simuladores
     sim_alb_url = sim_output.get("SIM_ALB_URL", "")
@@ -499,17 +632,48 @@ with st.sidebar:
     # Status do Cluster
     cluster_ok = check_cluster_exists()
     if cluster_ok:
-        st.success(f"✅ Cluster ativo")
+        st.success("✅ Cluster ativo")
     else:
-        st.error(f"❌ Cluster não encontrado")
+        st.error("❌ Cluster não encontrado")
         st.caption("Execute: `python simulador_ecs/deploy_simulador.py`")
 
     st.markdown("---")
 
     # Botão de Emergência
-    if st.button("🛑 Parar TODAS as Tasks", type="secondary", use_container_width=True):
-        n = stop_all_tasks()
-        st.info(f"{n} task(s) parada(s).")
+    if st.button(
+        "🛑 Parar TODAS as Tasks", type="secondary", use_container_width=True
+    ):
+        with st.spinner(
+            "Parando simuladores com drain (aguardando pedidos ativos)…"
+        ):
+            # 1) Para gerador de pedidos (para não entrar pedido novo)
+            sim_pedidos_cfg = SIMULATORS.get("sim_pedidos")
+            if sim_pedidos_cfg:
+                try:
+                    scale_service(
+                        sim_pedidos_cfg["SERVICE_NAME"],
+                        sim_pedidos_cfg["TASK_FAMILY"],
+                        0,
+                    )
+                except Exception:
+                    pass
+
+            # 2) Aguarda pedidos ativos finalizarem no Order Service
+            wait_for_no_active_orders(api_url, sim_alb_url)
+
+            # 3) Agora sim derruba restaurante/entregadores (e opcionalmente o gateway)
+            for key in ("sim_restaurante", "sim_entregadores", "general_api"):
+                cfg = SIMULATORS.get(key)
+                if not cfg:
+                    continue
+                try:
+                    scale_service(cfg["SERVICE_NAME"], cfg["TASK_FAMILY"], 0)
+                except Exception:
+                    pass
+
+            # 4) Por fim, para qualquer task avulsa que ainda esteja viva
+            n = stop_all_tasks()
+        st.info(f"✅ Drain concluído. {n} task(s) parada(s).")
 
     st.markdown("---")
     if st.button("🔄 Atualizar Dados", use_container_width=True):
@@ -521,36 +685,43 @@ with st.sidebar:
 # HEADER
 # =========================================================================
 st.markdown("# 🚀 Gerenciador de Simuladores DijkFood")
-st.markdown("Controle os simuladores, visualize logs em tempo real, e monitore a infraestrutura.")
+st.markdown(
+    "Controle os simuladores, visualize logs em tempo real, e monitore a infraestrutura."
+)
 
 if not cluster_ok:
-    st.warning("⚠️ O cluster de simuladores não está ativo. Execute o deploy primeiro.")
+    st.warning(
+        "⚠️ O cluster de simuladores não está ativo. Execute o deploy primeiro."
+    )
     st.code("python simulador_ecs/deploy_simulador.py", language="bash")
     st.stop()
 
 if not api_url:
-    st.warning("⚠️ URL do ALB principal não configurada. Os simuladores não saberão para onde enviar requisições.")
+    st.warning(
+        "⚠️ URL do ALB principal não configurada. Os simuladores não saberão para onde enviar requisições."
+    )
 
 
 # =========================================================================
 # TABS PRINCIPAIS
 # =========================================================================
-tab_control, tab_logs, tab_status = st.tabs(["🎮 Controle", "📋 Logs", "📊 Status"])
+tab_control, tab_logs, tab_status = st.tabs(
+    ["🎮 Controle", "📋 Logs", "📊 Status"]
+)
 
 
 # ─── ABA CONTROLE ────────────────────────────────────────────────────────
 with tab_control:
-
     # ── P95 LATENCY BANNER ──
     st.markdown("### 📊 Métricas de Performance em Tempo Real")
 
     metrics = extract_p95_from_logs()
     if metrics:
-        p95_val = metrics.get('p95', 0)
-        avg_val = metrics.get('avg', 0)
-        rate_val = metrics.get('rate', 0)
-        sent_val = metrics.get('sent', 0)
-        err_val = metrics.get('errors', 0)
+        p95_val = metrics.get("p95", 0)
+        avg_val = metrics.get("avg", 0)
+        rate_val = metrics.get("rate", 0)
+        sent_val = metrics.get("sent", 0)
+        err_val = metrics.get("errors", 0)
 
         # P95 Banner colorido
         if p95_val <= 500:
@@ -565,28 +736,36 @@ with tab_control:
 
         st.markdown(
             f'<div class="{css_class}">'
-            f'{emoji} P95 Latency: <strong>{p95_val}ms</strong> '
-            f'(meta: ≤500ms)'
-            f'</div>',
-            unsafe_allow_html=True
+            f"{emoji} P95 Latency: <strong>{p95_val}ms</strong> "
+            f"(meta: ≤500ms)"
+            f"</div>",
+            unsafe_allow_html=True,
         )
         st.markdown("")  # Spacer
 
         # Métricas em colunas
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("P95 Latência", f"{p95_val}ms", delta=f"{'OK' if p95_val <= 500 else 'ALTO'}")
+        m1.metric(
+            "P95 Latência",
+            f"{p95_val}ms",
+            delta=f"{'OK' if p95_val <= 500 else 'ALTO'}",
+        )
         m2.metric("Avg Latência", f"{avg_val}ms")
         m3.metric("Rate Config.", f"{rate_val}/s")
         m4.metric("Total Enviados", f"{sent_val:,}")
         m5.metric("Total Erros", f"{err_val:,}")
     else:
-        st.info("📊 Métricas P95 aparecerão aqui quando o simulador de clientes estiver rodando.")
+        st.info(
+            "📊 Métricas P95 aparecerão aqui quando o simulador de clientes estiver rodando."
+        )
 
     st.markdown("---")
 
     # ── CONTROLE RÁPIDO DE RATE ──
     st.markdown("### ⚡ Controle Rápido de Carga")
-    st.caption("Configure a taxa de pedidos por segundo. O professor solicitou testes com 10, 50 e 200 ped/s.")
+    st.caption(
+        "Configure a taxa de pedidos por segundo. O professor solicitou testes com 10, 50 e 200 ped/s."
+    )
 
     rate_cols = st.columns(4)
     rate_presets = [
@@ -599,44 +778,54 @@ with tab_control:
 
     for idx, (label, rate_val) in enumerate(rate_presets):
         with rate_cols[idx]:
-            if st.button(label, key=f"quick_rate_{rate_val}", use_container_width=True):
+            if st.button(
+                label, key=f"quick_rate_{rate_val}", use_container_width=True
+            ):
                 with st.spinner(f"Aplicando rate={rate_val}/s..."):
                     ok = update_service_rate(
-                        sim_pedidos_config['SERVICE_NAME'],
-                        sim_pedidos_config['TASK_FAMILY'],
-                        sim_pedidos_config['CONTAINER_NAME'],
-                        rate_val
+                        sim_pedidos_config["SERVICE_NAME"],
+                        sim_pedidos_config["TASK_FAMILY"],
+                        sim_pedidos_config["CONTAINER_NAME"],
+                        rate_val,
                     )
                     if ok:
                         # Garante que o serviço está rodando com pelo menos 1 instância
-                        svc = get_service_info(sim_pedidos_config['SERVICE_NAME'])
-                        if svc and svc['desiredCount'] == 0:
+                        svc = get_service_info(
+                            sim_pedidos_config["SERVICE_NAME"]
+                        )
+                        if svc and svc["desiredCount"] == 0:
                             scale_service(
-                                sim_pedidos_config['SERVICE_NAME'],
-                                sim_pedidos_config['TASK_FAMILY'],
-                                1
+                                sim_pedidos_config["SERVICE_NAME"],
+                                sim_pedidos_config["TASK_FAMILY"],
+                                1,
                             )
-                        st.success(f"✅ Rate atualizado para {rate_val}/s! Novo deploy em andamento.")
+                        st.success(
+                            f"✅ Rate atualizado para {rate_val}/s! Novo deploy em andamento."
+                        )
                         time.sleep(2)
                         st.rerun()
 
     with rate_cols[3]:
-        custom_rate = st.number_input("Custom", min_value=1, max_value=500, value=10, key="custom_rate")
-        if st.button("Aplicar", key="apply_custom_rate", use_container_width=True):
+        custom_rate = st.number_input(
+            "Custom", min_value=1, max_value=500, value=10, key="custom_rate"
+        )
+        if st.button(
+            "Aplicar", key="apply_custom_rate", use_container_width=True
+        ):
             with st.spinner(f"Aplicando rate={custom_rate}/s..."):
                 ok = update_service_rate(
-                    sim_pedidos_config['SERVICE_NAME'],
-                    sim_pedidos_config['TASK_FAMILY'],
-                    sim_pedidos_config['CONTAINER_NAME'],
-                    custom_rate
+                    sim_pedidos_config["SERVICE_NAME"],
+                    sim_pedidos_config["TASK_FAMILY"],
+                    sim_pedidos_config["CONTAINER_NAME"],
+                    custom_rate,
                 )
                 if ok:
-                    svc = get_service_info(sim_pedidos_config['SERVICE_NAME'])
-                    if svc and svc['desiredCount'] == 0:
+                    svc = get_service_info(sim_pedidos_config["SERVICE_NAME"])
+                    if svc and svc["desiredCount"] == 0:
                         scale_service(
-                            sim_pedidos_config['SERVICE_NAME'],
-                            sim_pedidos_config['TASK_FAMILY'],
-                            1
+                            sim_pedidos_config["SERVICE_NAME"],
+                            sim_pedidos_config["TASK_FAMILY"],
+                            1,
                         )
                     st.success(f"✅ Rate atualizado para {custom_rate}/s!")
                     time.sleep(2)
@@ -647,20 +836,22 @@ with tab_control:
     # Listar tasks ativas
     running_tasks = list_running_tasks()
     if running_tasks:
-        st.info(f"🟢 **{len(running_tasks)} task(s) em execução** no cluster de simuladores")
+        st.info(
+            f"🟢 **{len(running_tasks)} task(s) em execução** no cluster de simuladores"
+        )
 
     # ── SERVICES ──
     st.markdown("### 🔁 Services")
 
-    services = {k: v for k, v in SIMULATORS.items() if v['TYPE'] == 'service'}
+    services = {k: v for k, v in SIMULATORS.items() if v["TYPE"] == "service"}
     cols = st.columns(len(services))
 
     for idx, (sim_key, sim_config) in enumerate(services.items()):
         with cols[idx]:
-            description = sim_config['DESCRIPTION']
-            service_name = sim_config['SERVICE_NAME']
+            description = sim_config["DESCRIPTION"]
+            service_name = sim_config["SERVICE_NAME"]
             icon = SIM_ICONS.get(sim_key, "🔁")
-            short_desc = description.split('—')[0].strip()
+            short_desc = description.split("—")[0].strip()
 
             st.markdown(f"#### {icon} {short_desc}")
 
@@ -669,45 +860,60 @@ with tab_control:
             if svc_info:
                 mcol1, mcol2 = st.columns(2)
                 with mcol1:
-                    st.metric("Desejadas", svc_info['desiredCount'])
+                    st.metric("Desejadas", svc_info["desiredCount"])
                 with mcol2:
-                    st.metric("Rodando", svc_info['runningCount'])
+                    st.metric("Rodando", svc_info["runningCount"])
 
-                if svc_info['pendingCount'] > 0:
+                if svc_info["pendingCount"] > 0:
                     st.caption(f"⏳ {svc_info['pendingCount']} pending")
             else:
                 st.caption("Service não encontrado ou inativo.")
 
             # Formulário de escala
             with st.form(key=f"scale_{sim_key}"):
-                current = svc_info['desiredCount'] if svc_info else 0
+                current = svc_info["desiredCount"] if svc_info else 0
 
                 desired = st.slider(
                     "Instâncias",
-                    min_value=0, max_value=10, value=current,
-                    key=f"desired_{sim_key}"
+                    min_value=0,
+                    max_value=10,
+                    value=current,
+                    key=f"desired_{sim_key}",
                 )
 
                 submitted = st.form_submit_button(
                     "📐 Aplicar Escala",
                     type="primary",
-                    use_container_width=True
+                    use_container_width=True,
                 )
 
                 if submitted:
                     with st.spinner("Aplicando mudanças..."):
-                        ok = scale_service(
-                            service_name,
-                            sim_config['TASK_FAMILY'],
-                            desired
-                        )
+                        if desired == 0 and sim_key in (
+                            "sim_restaurante",
+                            "sim_entregadores",
+                        ):
+                            ok = graceful_scale_down(
+                                sim_key,
+                                sim_config,
+                                api_url=api_url,
+                                sim_alb_url=sim_alb_url,
+                            )
+                        else:
+                            ok = scale_service(
+                                service_name,
+                                sim_config["TASK_FAMILY"],
+                                desired,
+                            )
                         if ok:
-                            st.success(f"✅ Escalado para {desired} instância(s)")
+                            st.success(
+                                f"✅ Escalado para {desired} instância(s)"
+                            )
                             time.sleep(1)
                             st.rerun()
 
     # ── TASKS BATCH (opcionais) ──
-    tasks_batch = {k: v for k, v in SIMULATORS.items() if v['TYPE'] == 'task'}
+    tasks_batch = {k: v for k, v in SIMULATORS.items() if v["TYPE"] == "task"}
     if tasks_batch:
         st.markdown("---")
         st.markdown("### ⚡ Tasks Batch (População)")
@@ -716,49 +922,62 @@ with tab_control:
         for idx, (sim_key, sim_config) in enumerate(tasks_batch.items()):
             with batch_cols[idx]:
                 icon = SIM_ICONS.get(sim_key, "⚡")
-                st.markdown(f"#### {icon} {sim_config['DESCRIPTION'].split('—')[0].split('-')[0].strip()}")
+                st.markdown(
+                    f"#### {icon} {sim_config['DESCRIPTION'].split('—')[0].split('-')[0].strip()}"
+                )
 
                 with st.form(key=f"form_{sim_key}"):
                     num_tasks = st.slider(
                         "Tasks a disparar",
-                        min_value=1, max_value=10, value=1, step=1,
-                        key=f"tasks_{sim_key}"
+                        min_value=1,
+                        max_value=10,
+                        value=1,
+                        step=1,
+                        key=f"tasks_{sim_key}",
                     )
 
                     extra_env = []
                     cmd_override = None
 
                     submitted = st.form_submit_button(
-                        f"🚀 Disparar",
-                        type="primary",
-                        use_container_width=True
+                        "🚀 Disparar", type="primary", use_container_width=True
                     )
 
                     if submitted:
                         with st.spinner(f"Disparando {num_tasks} task(s)..."):
                             response = run_ecs_task(
-                                sim_key, sim_config, num_tasks,
-                                api_url, extra_env, cmd_override
+                                sim_key,
+                                sim_config,
+                                num_tasks,
+                                api_url,
+                                extra_env,
+                                cmd_override,
                             )
                             if response:
-                                launched = len(response.get('tasks', []))
-                                failures = response.get('failures', [])
+                                launched = len(response.get("tasks", []))
+                                failures = response.get("failures", [])
                                 if launched > 0:
-                                    st.success(f"✅ {launched} task(s) disparadas!")
+                                    st.success(
+                                        f"✅ {launched} task(s) disparadas!"
+                                    )
                                 if failures:
                                     st.warning(f"⚠️ {len(failures)} falha(s)")
                                     for f_item in failures:
-                                        st.caption(f"Motivo: {f_item.get('reason', 'desconhecido')}")
+                                        st.caption(
+                                            f"Motivo: {f_item.get('reason', 'desconhecido')}"
+                                        )
 
 
 # ─── ABA LOGS ────────────────────────────────────────────────────────────
 with tab_logs:
     st.markdown("### 📋 Monitoramento e Logs")
-    st.caption(f"Acompanhe o estado do banco e os logs dos containers (CloudWatch: `{LOG_GROUP_NAME}`)")
+    st.caption(
+        f"Acompanhe o estado do banco e os logs dos containers (CloudWatch: `{LOG_GROUP_NAME}`)"
+    )
 
     log_tab_names = ["📈 Ciclo de Vida (DynamoDB)"]
     for sim_config in SIMULATORS.values():
-        name = sim_config['DESCRIPTION'].split('(')[0].split('—')[0].strip()
+        name = sim_config["DESCRIPTION"].split("(")[0].split("—")[0].strip()
         log_tab_names.append(name)
 
     log_tabs = st.tabs(log_tab_names)
@@ -769,7 +988,11 @@ with tab_logs:
 
         col_auto, col_btn = st.columns([1, 4])
         with col_auto:
-            auto_refresh = st.checkbox("Auto-Atualizar (3s)", value=False, help="Atualiza a contagem quase em tempo real")
+            auto_refresh = st.checkbox(
+                "Auto-Atualizar (3s)",
+                value=False,
+                help="Atualiza a contagem quase em tempo real",
+            )
         with col_btn:
             if st.button("🔄 Atualizar Contagens", key="refresh_dynamo"):
                 pass
@@ -781,13 +1004,19 @@ with tab_logs:
             st.markdown("#### 🎯 Performance")
             metrics_here = extract_p95_from_logs()
             if metrics_here:
-                p95_v = metrics_here.get('p95', 0)
+                p95_v = metrics_here.get("p95", 0)
                 if p95_v <= 500:
-                    st.success(f"✅ **P95 Latency: {p95_v}ms** — Dentro do objetivo (≤500ms)")
+                    st.success(
+                        f"✅ **P95 Latency: {p95_v}ms** — Dentro do objetivo (≤500ms)"
+                    )
                 elif p95_v <= 1000:
-                    st.warning(f"⚠️ **P95 Latency: {p95_v}ms** — Acima do objetivo (≤500ms)")
+                    st.warning(
+                        f"⚠️ **P95 Latency: {p95_v}ms** — Acima do objetivo (≤500ms)"
+                    )
                 else:
-                    st.error(f"❌ **P95 Latency: {p95_v}ms** — Muito acima do objetivo (≤500ms)")
+                    st.error(
+                        f"❌ **P95 Latency: {p95_v}ms** — Muito acima do objetivo (≤500ms)"
+                    )
             else:
                 st.caption("_Aguardando métricas do simulador..._")
 
@@ -797,14 +1026,35 @@ with tab_logs:
             total_orders = sum(counts.values())
             if total_orders > 0:
                 progress_cols = st.columns(6)
-                labels = ["Confirmados", "Em Preparo", "Prontos", "Coletados", "Em Trânsito", "Entregues"]
-                keys = ["CONFIRMED", "PREPARING", "READY_FOR_PICKUP", "PICKED_UP", "IN_TRANSIT", "DELIVERED"]
+                labels = [
+                    "Confirmados",
+                    "Em Preparo",
+                    "Prontos",
+                    "Coletados",
+                    "Em Trânsito",
+                    "Entregues",
+                ]
+                keys = [
+                    "CONFIRMED",
+                    "PREPARING",
+                    "READY_FOR_PICKUP",
+                    "PICKED_UP",
+                    "IN_TRANSIT",
+                    "DELIVERED",
+                ]
                 for pc, lbl, key in zip(progress_cols, labels, keys):
                     pc.metric(lbl, counts[key])
 
                 # Barra de progresso mostrando o fluxo
-                delivered_pct = counts["DELIVERED"] / total_orders if total_orders > 0 else 0
-                st.progress(delivered_pct, text=f"Progresso: {counts['DELIVERED']}/{total_orders} entregues ({delivered_pct:.0%})")
+                delivered_pct = (
+                    counts["DELIVERED"] / total_orders
+                    if total_orders > 0
+                    else 0
+                )
+                st.progress(
+                    delivered_pct,
+                    text=f"Progresso: {counts['DELIVERED']}/{total_orders} entregues ({delivered_pct:.0%})",
+                )
 
             else:
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -821,48 +1071,60 @@ with tab_logs:
             d2.metric("Ocupados", drivers["EM_ENTREGA"])
             d3.metric("Total", drivers["LIVRE"] + drivers["EM_ENTREGA"])
         else:
-            st.warning("Não foi possível acessar a tabela DijkfoodOrders no momento.")
+            st.warning(
+                "Não foi possível acessar a tabela DijkfoodOrders no momento."
+            )
 
         if auto_refresh:
             time.sleep(3)
             st.rerun()
 
-    for log_tab, (sim_key, sim_config) in zip(log_tabs[1:], SIMULATORS.items()):
+    for log_tab, (sim_key, sim_config) in zip(
+        log_tabs[1:], SIMULATORS.items()
+    ):
         with log_tab:
-            prefix = sim_config['LOG_STREAM_PREFIX']
+            prefix = sim_config["LOG_STREAM_PREFIX"]
             col_refresh, col_count = st.columns([1, 3])
 
             with col_refresh:
-                if st.button(f"🔄 Atualizar", key=f"refresh_logs_{sim_key}"):
+                if st.button("🔄 Atualizar", key=f"refresh_logs_{sim_key}"):
                     pass  # Streamlit reruns on button click
 
             with col_count:
                 num_events = st.slider(
-                    "Linhas por stream", 10, 100, 30, 10,
-                    key=f"log_lines_{sim_key}"
+                    "Linhas por stream",
+                    10,
+                    100,
+                    30,
+                    10,
+                    key=f"log_lines_{sim_key}",
                 )
 
-            logs_data = fetch_logs(prefix, limit_streams=5, limit_events=num_events)
+            logs_data = fetch_logs(
+                prefix, limit_streams=5, limit_events=num_events
+            )
 
             if logs_data is None:
-                st.info("Nenhum log encontrado para este simulador. Dispare uma task ou escale o service primeiro.")
+                st.info(
+                    "Nenhum log encontrado para este simulador. Dispare uma task ou escale o service primeiro."
+                )
             else:
                 # Agregar todos os eventos de todos os streams
                 all_aggregated_events = []
                 for log_entry in logs_data:
-                    all_aggregated_events.extend(log_entry['events'])
+                    all_aggregated_events.extend(log_entry["events"])
 
                 # Ordenar cronologicamente pelo timestamp
-                all_aggregated_events.sort(key=lambda e: e.get('timestamp', 0))
+                all_aggregated_events.sort(key=lambda e: e.get("timestamp", 0))
 
                 if not all_aggregated_events:
                     st.caption("Nenhum evento recente encontrado.")
                 else:
                     log_text = ""
                     for event in all_aggregated_events:
-                        ts = event.get('timestamp', 0)
+                        ts = event.get("timestamp", 0)
                         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-                        msg = event.get('message', '')
+                        msg = event.get("message", "")
                         log_text += f"[{dt.strftime('%H:%M:%S')}] {msg}\n"
 
                     st.code(log_text, language="log")
@@ -879,10 +1141,12 @@ with tab_status:
     with col1:
         st.metric("🖥️ Tasks Ativas", len(running_tasks))
     with col2:
-        services_count = sum(1 for s in SIMULATORS.values() if s['TYPE'] == 'service')
+        services_count = sum(
+            1 for s in SIMULATORS.values() if s["TYPE"] == "service"
+        )
         st.metric("🔁 Services", services_count)
     with col3:
-        task_types = sum(1 for s in SIMULATORS.values() if s['TYPE'] == 'task')
+        task_types = sum(1 for s in SIMULATORS.values() if s["TYPE"] == "task")
         st.metric("⚡ Tasks Batch", task_types)
     with col4:
         st.metric("📊 Total Configs", len(SIMULATORS))
@@ -891,32 +1155,40 @@ with tab_status:
 
     # Status de cada service
     st.markdown("#### Status dos Services")
-    service_items = [(k, v) for k, v in SIMULATORS.items() if v['TYPE'] == 'service']
+    service_items = [
+        (k, v) for k, v in SIMULATORS.items() if v["TYPE"] == "service"
+    ]
     svc_cols = st.columns(len(service_items))
 
     for idx, (sim_key, sim_config) in enumerate(service_items):
         with svc_cols[idx]:
-            svc_info = get_service_info(sim_config['SERVICE_NAME'])
-            running = svc_info['runningCount'] if svc_info else 0
-            desired = svc_info['desiredCount'] if svc_info else 0
-            status = "ACTIVE" if running > 0 else ("SCALING" if desired > 0 else "STOPPED")
+            svc_info = get_service_info(sim_config["SERVICE_NAME"])
+            running = svc_info["runningCount"] if svc_info else 0
+            desired = svc_info["desiredCount"] if svc_info else 0
+            status = (
+                "ACTIVE"
+                if running > 0
+                else ("SCALING" if desired > 0 else "STOPPED")
+            )
 
             badge_cls = {
-                'ACTIVE': 'badge-active',
-                'SCALING': 'badge-pending',
-                'STOPPED': 'badge-inactive',
-            }.get(status, 'badge-inactive')
+                "ACTIVE": "badge-active",
+                "SCALING": "badge-pending",
+                "STOPPED": "badge-inactive",
+            }.get(status, "badge-inactive")
 
             icon = SIM_ICONS.get(sim_key, "🔁")
-            short_desc = sim_config["DESCRIPTION"].split("—")[0].split("(")[0].strip()
+            short_desc = (
+                sim_config["DESCRIPTION"].split("—")[0].split("(")[0].strip()
+            )
 
             st.markdown(
                 f'<div class="sim-card">'
                 f'<span class="status-badge {badge_cls}">{status}</span><br>'
-                f'{icon} <strong>{short_desc}</strong><br>'
-                f'<small>Running: {running}/{desired}</small>'
-                f'</div>',
-                unsafe_allow_html=True
+                f"{icon} <strong>{short_desc}</strong><br>"
+                f"<small>Running: {running}/{desired}</small>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
 
     st.markdown("---")
@@ -925,25 +1197,27 @@ with tab_status:
     if running_tasks:
         st.markdown("#### Tasks em Execução")
         for task in running_tasks:
-            task_id = task['taskArn'].split('/')[-1][:12]
-            status = task.get('lastStatus', 'UNKNOWN')
-            task_def = task.get('taskDefinitionArn', '').split('/')[-1]
-            started = task.get('startedAt')
+            task_id = task["taskArn"].split("/")[-1][:12]
+            status = task.get("lastStatus", "UNKNOWN")
+            task_def = task.get("taskDefinitionArn", "").split("/")[-1]
+            started = task.get("startedAt")
 
             # Determinar qual simulador é
             sim_name = "desconhecido"
             sim_icon = "❓"
             for sk, sc in SIMULATORS.items():
-                if sc['TASK_FAMILY'] in task.get('taskDefinitionArn', ''):
-                    sim_name = sc['DESCRIPTION'].split('(')[0].split('—')[0].strip()
+                if sc["TASK_FAMILY"] in task.get("taskDefinitionArn", ""):
+                    sim_name = (
+                        sc["DESCRIPTION"].split("(")[0].split("—")[0].strip()
+                    )
                     sim_icon = SIM_ICONS.get(sk, "🔁")
                     break
 
             badge_cls = {
-                'RUNNING': 'badge-active',
-                'PENDING': 'badge-pending',
-                'PROVISIONING': 'badge-pending',
-            }.get(status, 'badge-inactive')
+                "RUNNING": "badge-active",
+                "PENDING": "badge-pending",
+                "PROVISIONING": "badge-pending",
+            }.get(status, "badge-inactive")
 
             uptime = ""
             if started:
@@ -954,11 +1228,11 @@ with tab_status:
             st.markdown(
                 f'<div class="sim-card">'
                 f'<span class="status-badge {badge_cls}">{status}</span> '
-                f'{sim_icon} <strong>{sim_name}</strong> '
-                f'<code>{task_id}</code>{uptime}'
-                f'<br><small>{task_def}</small>'
-                f'</div>',
-                unsafe_allow_html=True
+                f"{sim_icon} <strong>{sim_name}</strong> "
+                f"<code>{task_id}</code>{uptime}"
+                f"<br><small>{task_def}</small>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
     else:
         st.info("Nenhuma task em execução no momento.")
@@ -973,22 +1247,34 @@ with tab_status:
     with col_net1:
         st.text_input("Security Group ID", value=sg_id or "N/A", disabled=True)
         st.text_input("Cluster", value=CLUSTER_NAME, disabled=True)
-        st.text_input("ALB Simuladores", value=sim_output.get("SIM_ALB_URL", "N/A"), disabled=True)
+        st.text_input(
+            "ALB Simuladores",
+            value=sim_output.get("SIM_ALB_URL", "N/A"),
+            disabled=True,
+        )
     with col_net2:
-        st.text_input("Subnets", value=", ".join(subnet_ids) if subnet_ids else "N/A", disabled=True)
+        st.text_input(
+            "Subnets",
+            value=", ".join(subnet_ids) if subnet_ids else "N/A",
+            disabled=True,
+        )
         st.text_input("Log Group", value=LOG_GROUP_NAME, disabled=True)
         st.text_input("ALB Principal", value=api_url or "N/A", disabled=True)
 
     st.markdown("---")
     st.markdown("#### Simuladores Registrados")
     for sim_key, sim_config in SIMULATORS.items():
-        icon = SIM_ICONS.get(sim_key, "🔁" if sim_config['TYPE'] == 'service' else "⚡")
+        icon = SIM_ICONS.get(
+            sim_key, "🔁" if sim_config["TYPE"] == "service" else "⚡"
+        )
         with st.expander(f"{icon} {sim_config['DESCRIPTION']}"):
-            st.json({
-                "key": sim_key,
-                "repo": sim_config['REPO_NAME'],
-                "task_family": sim_config['TASK_FAMILY'],
-                "type": sim_config['TYPE'],
-                "dockerfile": sim_config['DOCKERFILE'],
-                "env_mapping": sim_config.get('ENV_MAPPING', {}),
-            })
+            st.json(
+                {
+                    "key": sim_key,
+                    "repo": sim_config["REPO_NAME"],
+                    "task_family": sim_config["TASK_FAMILY"],
+                    "type": sim_config["TYPE"],
+                    "dockerfile": sim_config["DOCKERFILE"],
+                    "env_mapping": sim_config.get("ENV_MAPPING", {}),
+                }
+            )
