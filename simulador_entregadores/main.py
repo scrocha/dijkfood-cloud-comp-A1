@@ -4,7 +4,7 @@ import random
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import FastAPI
 
 from simulador_entregadores.models import (
     GoToClientRequest,
@@ -15,11 +15,15 @@ from simulador_entregadores.models import (
 # Configurações
 GENERAL_API_URL = os.getenv("GENERAL_API_URL", "http://general-api:8000").rstrip("/")
 
+active_tasks = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(timeout=30.0)
     yield
+    if active_tasks:
+        print(f"[Worker] Aguardando {len(active_tasks)} entregas finalizarem")
+        await asyncio.gather(*active_tasks, return_exceptions=True)
     await app.state.http.aclose()
 
 
@@ -70,7 +74,7 @@ async def _webhook_com_retry(endpoint: str, payload: dict, max_retries: int = 3)
 
 
 @app.post("/simulador/entregador/go-to-restaurant")
-async def go_to_restaurant(req: GoToRestaurantRequest, background_tasks: BackgroundTasks):
+async def go_to_restaurant(req: GoToRestaurantRequest):
     async def _fase_restaurante():
         print(f"[Worker] Courier {req.courier_id} indo ao Restaurante (Pedido {req.order_id})")
         await _executar_trajeto(req.courier_id, req.order_id, req.route)
@@ -81,12 +85,14 @@ async def go_to_restaurant(req: GoToRestaurantRequest, background_tasks: Backgro
             {"order_id": req.order_id, "courier_id": req.courier_id},
         )
 
-    background_tasks.add_task(_fase_restaurante)
+    task = asyncio.create_task(_fase_restaurante())
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
     return {"status": "moving_to_restaurant", "courier_id": req.courier_id}
 
 
 @app.post("/simulador/entregador/pickup-and-deliver")
-async def pickup_and_deliver(req: GoToClientRequest, background_tasks: BackgroundTasks):
+async def pickup_and_deliver(req: GoToClientRequest):
     async def _fase_entrega():
         print(f"[Worker] Courier {req.courier_id} coletou Pedido {req.order_id}, indo ao cliente...")
         await asyncio.sleep(random.uniform(0.3, 0.8))
@@ -101,12 +107,14 @@ async def pickup_and_deliver(req: GoToClientRequest, background_tasks: Backgroun
             {"order_id": req.order_id, "courier_id": req.courier_id},
         )
 
-    background_tasks.add_task(_fase_entrega)
+    task = asyncio.create_task(_fase_entrega())
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
     return {"status": "picking_up_and_delivering", "courier_id": req.courier_id}
 
 
 @app.post("/simulador/entregador/go-to-client")
-async def go_to_client(req: GoToClientRequest, background_tasks: BackgroundTasks):
+async def go_to_client(req: GoToClientRequest):
     async def _fase_entrega():
         print(f"[Worker] Courier {req.courier_id} entregando ao Cliente.")
         await asyncio.sleep(0.5)
@@ -117,7 +125,9 @@ async def go_to_client(req: GoToClientRequest, background_tasks: BackgroundTasks
             {"order_id": req.order_id, "courier_id": req.courier_id},
         )
 
-    background_tasks.add_task(_fase_entrega)
+    task = asyncio.create_task(_fase_entrega())
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
     return {"status": "moving_to_client", "courier_id": req.courier_id}
 
 
