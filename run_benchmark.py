@@ -82,10 +82,29 @@ def ensure_deployment(force: bool = False):
         )
         return
 
-    run_command(
-        [sys.executable, "deploy.py"],
-        "Deploy completo da infraestrutura e dos simuladores",
-    )
+    try:
+        run_command(
+            [sys.executable, "deploy.py"],
+            "Deploy completo da infraestrutura e dos simuladores",
+        )
+    except subprocess.CalledProcessError as exc:
+        if _environment_looks_alive():
+            print(
+                "\n>>> Deploy falhou, mas o ambiente ECS já está vivo. "
+                "Continuando o benchmark com os recursos existentes."
+            )
+            return
+        raise RuntimeError(
+            "Falha no deploy e não foi possível confirmar um ambiente ativo."
+        ) from exc
+
+
+def _environment_looks_alive() -> bool:
+    try:
+        instances = get_running_instances()
+        return any(count > 0 for count in instances.values())
+    except Exception:
+        return False
 
 
 def update_sim_rate(new_rate):
