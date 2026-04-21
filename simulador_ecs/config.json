@@ -22,9 +22,9 @@
       "ALB_PATH_PATTERNS": null,
       "DESCRIPTION": "API Geral - Gateway Orquestrador",
       "ENV_MAPPING": {
-        "DATABASE_SERVICE_URL": "{API_URL}",
-        "ORDER_SERVICE_URL": "{API_URL}",
-        "ROUTE_SERVICE_URL": "{API_URL}",
+        "DATABASE_SERVICE_URL": "{API_URL}/cadastro",
+        "ORDER_SERVICE_URL": "{API_URL}/pedidos",
+        "ROUTE_SERVICE_URL": "{API_URL}/rotas",
         "SIM_RESTAURANT_URL": "{SIM_ALB_URL}",
         "SIM_COURIER_URL": "{SIM_ALB_URL}"
       },
