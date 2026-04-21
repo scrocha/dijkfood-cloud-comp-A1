@@ -216,3 +216,5 @@ alb_endpoints.json
 
 artifacts/carga*
 GEMINI.md
+.docker_config/
+docker/

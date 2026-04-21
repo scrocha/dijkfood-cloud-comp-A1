@@ -1,21 +1,22 @@
-import boto3
-from botocore.exceptions import ClientError
-import time
-import os
-import psycopg2
-import subprocess
-import json
 import base64
-import hashlib
+import json
+import os
+import subprocess
+import time
 from pathlib import Path
+
+import boto3
+import psycopg2
+from botocore.exceptions import ClientError
 
 # =========================================================================
 # CONFIGURAÇÃO DE CAMINHOS (BLINDADA)
 # =========================================================================
-ROOT_DIR = Path(__file__).resolve().parent 
+ROOT_DIR = Path(__file__).resolve().parent
 DATABASE_DIR = ROOT_DIR / "database"
 ROUTE_DIR = ROOT_DIR / "route_service"
 PEDIDOS_DIR = ROOT_DIR / "dynamo"
+DOCKER_DESKTOP_SOCKET = Path.home() / ".docker" / "desktop" / "docker.sock"
 
 DOCKERFILE_CADASTRO = DATABASE_DIR / "Dockerfile"
 DOCKERFILE_ROTAS = ROUTE_DIR / "Dockerfile"
@@ -38,7 +39,7 @@ DB_PUBLICLY_ACCESSIBLE = True
 DB_IDENTIFIER = "dijkfood-db-instance"
 DB_NAME = "dijkfood"
 DB_USER = "postgres"
-DB_PASSWORD = "SuperSecretPassword123!" 
+DB_PASSWORD = "SuperSecretPassword123!"
 DB_PORT = 5432
 
 # configurações DynamoDB
@@ -57,18 +58,22 @@ TASK_MEMORY = "2048"
 ALB_NAME = "dijkfood-alb"
 ALB_SCHEME = "internet-facing"
 ALB_TYPE = "application"
-ALB_IP_ADDRESS_TYPE = "ipv4" 
+ALB_IP_ADDRESS_TYPE = "ipv4"
 
 # =========================================================================
 # CONFIGURAÇÕES DE AUTO SCALING
 # =========================================================================
 AS_MIN_CAPACITY = 2
-AS_MAX_CAPACITY = 10 
-AS_TARGET_VALUE_CPU = 20.0       # Threshold para serviços atrelados à CPU (Rotas/Pedidos)
-AS_TARGET_VALUE_REQ = 50      # Threshold agressivo para Cadastro: 50 requisições/minuto por Task
-AS_SCALE_OUT_COOLDOWN = 30       # Tempo rápido de reação para subir instâncias
+AS_MAX_CAPACITY = 10
+AS_TARGET_VALUE_CPU = (
+    20.0  # Threshold para serviços atrelados à CPU (Rotas/Pedidos)
+)
+AS_TARGET_VALUE_REQ = (
+    50  # Threshold agressivo para Cadastro: 50 requisições/minuto por Task
+)
+AS_SCALE_OUT_COOLDOWN = 30  # Tempo rápido de reação para subir instâncias
 AS_SCALE_IN_COOLDOWN = 60
-    
+
 # Nomes dos Target Groups
 TG_CADASTRO_NAME = "dijkfood-tg-cadastro"
 TG_ROTAS_NAME = "dijkfood-tg-rotas"
@@ -85,36 +90,53 @@ API_PORT_ROTAS = 8001
 API_PORT_PEDIDOS = 8002
 ALB_PORT = 80
 
-SG_NAME = 'dijkfood-sg-unified'
+SG_NAME = "dijkfood-sg-unified"
 
 # clientes boto3
-rds_client = boto3.client('rds', region_name=AWS_REGION)
-ec2_client = boto3.client('ec2', region_name=AWS_REGION)
-ecr_client = boto3.client('ecr', region_name=AWS_REGION)
-ecs_client = boto3.client('ecs', region_name=AWS_REGION)
-sts_client = boto3.client('sts', region_name=AWS_REGION)
-elbv2_client = boto3.client('elbv2', region_name=AWS_REGION)
-app_autoscaling = boto3.client('application-autoscaling', region_name=AWS_REGION)
+rds_client = boto3.client("rds", region_name=AWS_REGION)
+ec2_client = boto3.client("ec2", region_name=AWS_REGION)
+ecr_client = boto3.client("ecr", region_name=AWS_REGION)
+ecs_client = boto3.client("ecs", region_name=AWS_REGION)
+sts_client = boto3.client("sts", region_name=AWS_REGION)
+elbv2_client = boto3.client("elbv2", region_name=AWS_REGION)
+app_autoscaling = boto3.client(
+    "application-autoscaling", region_name=AWS_REGION
+)
+
+
+def build_docker_env():
+    docker_env = {
+        **os.environ,
+        "DOCKER_CONFIG": str(ROOT_DIR / ".docker_config"),
+    }
+    if (
+        not Path("/var/run/docker.sock").exists()
+        and DOCKER_DESKTOP_SOCKET.exists()
+    ):
+        docker_env["DOCKER_HOST"] = f"unix://{DOCKER_DESKTOP_SOCKET}"
+    return docker_env
 
 
 def setup_security_group():
     print("Configurando Security Group.")
-    vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-    vpc_id = vpcs['Vpcs'][0]['VpcId']
-    
+    vpcs = ec2_client.describe_vpcs(
+        Filters=[{"Name": "isDefault", "Values": ["true"]}]
+    )
+    vpc_id = vpcs["Vpcs"][0]["VpcId"]
+
     sg_id = None
     try:
         sg_response = ec2_client.create_security_group(
             GroupName=SG_NAME,
-            Description='Permite acesso ao PostgreSQL e APIs DijkFood',
-            VpcId=vpc_id
+            Description="Permite acesso ao PostgreSQL e APIs DijkFood",
+            VpcId=vpc_id,
         )
-        sg_id = sg_response['GroupId']
+        sg_id = sg_response["GroupId"]
         print(f"Security Group '{SG_NAME}' criado.")
     except ClientError as e:
-        if e.response['Error']['Code'] == 'InvalidGroup.Duplicate':
+        if e.response["Error"]["Code"] == "InvalidGroup.Duplicate":
             sgs = ec2_client.describe_security_groups(GroupNames=[SG_NAME])
-            sg_id = sgs['SecurityGroups'][0]['GroupId']
+            sg_id = sgs["SecurityGroups"][0]["GroupId"]
             print(f"Security Group '{SG_NAME}' já existe. ID: {sg_id}")
         else:
             raise e
@@ -124,23 +146,25 @@ def setup_security_group():
         (API_PORT_CADASTRO, "API Cadastro"),
         (API_PORT_ROTAS, "API Rotas"),
         (API_PORT_PEDIDOS, "API Pedidos"),
-        (ALB_PORT, "Load Balancer (HTTP)")
+        (ALB_PORT, "Load Balancer (HTTP)"),
     ]
 
     for port, label in ports:
         try:
             ec2_client.authorize_security_group_ingress(
                 GroupId=sg_id,
-                IpPermissions=[{
-                    'IpProtocol': 'tcp',
-                    'FromPort': port,
-                    'ToPort': port,
-                    'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
-                }]
+                IpPermissions=[
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": port,
+                        "ToPort": port,
+                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
+                    }
+                ],
             )
             print(f"Porta {port} ({label}) autorizada.")
         except ClientError as e:
-            if e.response['Error']['Code'] == 'InvalidPermission.Duplicate':
+            if e.response["Error"]["Code"] == "InvalidPermission.Duplicate":
                 pass
             else:
                 print(f"Aviso ao autorizar porta {port}: {e}")
@@ -154,36 +178,48 @@ def get_or_create_rds_instance(sg_id):
     # 1. Verifica se já existe
     needs_create = False
     try:
-        response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
-        status = response['DBInstances'][0]['DBInstanceStatus']
+        response = rds_client.describe_db_instances(
+            DBInstanceIdentifier=DB_IDENTIFIER
+        )
+        status = response["DBInstances"][0]["DBInstanceStatus"]
 
-        if status == 'available':
-            endpoint = response['DBInstances'][0]['Endpoint']['Address']
+        if status == "available":
+            endpoint = response["DBInstances"][0]["Endpoint"]["Address"]
             print(f"Banco RDS pronto. Endpoint: {endpoint}")
             return endpoint
-        elif status == 'deleting':
-            print(f"RDS está em 'deleting'. Aguardando exclusão completa...")
-            waiter_del = rds_client.get_waiter('db_instance_deleted')
+        elif status == "deleting":
+            print("RDS está em 'deleting'. Aguardando exclusão completa")
+            waiter_del = rds_client.get_waiter("db_instance_deleted")
             waiter_del.wait(
                 DBInstanceIdentifier=DB_IDENTIFIER,
-                WaiterConfig={'Delay': 20, 'MaxAttempts': 60}
+                WaiterConfig={"Delay": 20, "MaxAttempts": 60},
             )
             print("RDS deletado. Prosseguindo para criação.")
             needs_create = True
-        elif status in ('creating', 'backing-up', 'modifying', 'rebooting', 'resetting-master-credentials'):
+        elif status in (
+            "creating",
+            "backing-up",
+            "modifying",
+            "rebooting",
+            "resetting-master-credentials",
+        ):
             print(f"Banco RDS status: '{status}'. Aguardando disponibilidade.")
         else:
-            print(f"Banco RDS status inesperado: '{status}'. Tentando aguardar...")
+            print(
+                f"Banco RDS status inesperado: '{status}'. Tentando aguardar"
+            )
 
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DBInstanceNotFound':
+        if e.response["Error"]["Code"] == "DBInstanceNotFound":
             needs_create = True
         else:
             raise e
 
     # 2. Cria se necessário
     if needs_create:
-        print("Banco RDS não encontrado. Criando instância (pode levar 5-10 minutos).")
+        print(
+            "Banco RDS não encontrado. Criando instância (pode levar 5-10 minutos)."
+        )
         rds_client.create_db_instance(
             DBInstanceIdentifier=DB_IDENTIFIER,
             AllocatedStorage=DB_ALLOCATED_STORAGE,
@@ -197,40 +233,50 @@ def get_or_create_rds_instance(sg_id):
             DBName=DB_NAME,
             MultiAZ=False,
             VpcSecurityGroupIds=[sg_id],
-            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE
+            PubliclyAccessible=DB_PUBLICLY_ACCESSIBLE,
         )
 
         # Aguarda a instância aparecer na API (pode levar até ~60s)
-        print("Aguardando RDS aparecer na API...")
+        print("Aguardando RDS aparecer na API")
         for attempt in range(30):
             try:
-                resp_check = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
-                status = resp_check['DBInstances'][0]['DBInstanceStatus']
+                resp_check = rds_client.describe_db_instances(
+                    DBInstanceIdentifier=DB_IDENTIFIER
+                )
+                status = resp_check["DBInstances"][0]["DBInstanceStatus"]
                 print(f"  RDS encontrado! Status atual: {status}")
-                if status == 'available':
-                    endpoint = resp_check['DBInstances'][0]['Endpoint']['Address']
+                if status == "available":
+                    endpoint = resp_check["DBInstances"][0]["Endpoint"][
+                        "Address"
+                    ]
                     print(f"RDS disponível: {endpoint}")
                     return endpoint
                 break
             except ClientError as e:
-                if e.response['Error']['Code'] == 'DBInstanceNotFound':
-                    print(f"  Tentativa {attempt+1}/30 — instância ainda não visível...")
+                if e.response["Error"]["Code"] == "DBInstanceNotFound":
+                    print(
+                        f"  Tentativa {attempt + 1}/30 — instância ainda não visível"
+                    )
                     time.sleep(10)
                 else:
                     raise e
         else:
-            raise Exception("RDS não apareceu na API após 5 minutos. Verifique o console AWS.")
+            raise Exception(
+                "RDS não apareceu na API após 5 minutos. Verifique o console AWS."
+            )
 
     # 3. Waiter para ficar available
-    print("Aguardando RDS ficar 'available' (pode levar 5-10 min)...")
-    waiter = rds_client.get_waiter('db_instance_available')
+    print("Aguardando RDS ficar 'available' (pode levar 5-10 min)")
+    waiter = rds_client.get_waiter("db_instance_available")
     waiter.wait(
         DBInstanceIdentifier=DB_IDENTIFIER,
-        WaiterConfig={'Delay': 25, 'MaxAttempts': 60}
+        WaiterConfig={"Delay": 25, "MaxAttempts": 60},
     )
-    
-    response = rds_client.describe_db_instances(DBInstanceIdentifier=DB_IDENTIFIER)
-    endpoint = response['DBInstances'][0]['Endpoint']['Address']
+
+    response = rds_client.describe_db_instances(
+        DBInstanceIdentifier=DB_IDENTIFIER
+    )
+    endpoint = response["DBInstances"][0]["Endpoint"]["Address"]
     print(f"RDS disponível: {endpoint}")
     return endpoint
 
@@ -242,231 +288,242 @@ def run_ddl_only(endpoint):
         )
         conn.autocommit = True
         cursor = conn.cursor()
-        
-        with open(DDL_PATH, 'r', encoding='utf-8') as file:
+
+        with open(DDL_PATH, "r", encoding="utf-8") as file:
             ddl_script = file.read()
 
         cursor.execute(ddl_script)
         cursor.close()
         conn.close()
         print("Criação/Verificação das tabelas bem sucedida.")
-        
+
     except Exception as e:
         print(f"Erro ao interagir com o banco: {e}")
 
 
-def get_dir_hash(directory_path):
-    """Gera um hash baseado no conteúdo da pasta para detectar alterações."""
-    sha_hash = hashlib.sha256()
-    for root, dirs, files in os.walk(directory_path):
-        # Ignora pastas irrelevantes para o código em si
-        dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', 'venv', '.venv', 'node_modules', '.aws']]
-        for names in sorted(files):
-            filepath = os.path.join(root, names)
-            try:
-                with open(filepath, 'rb') as f:
-                    sha_hash.update(f.read())
-            except Exception:
-                pass
-    return sha_hash.hexdigest()[:8]
-
-
-def build_and_push_docker_image(repo_name, dockerfile_path, context_dir, ecr_client_param, sts_client_param, region):
+def build_and_push_docker_image(
+    repo_name,
+    dockerfile_path,
+    context_dir,
+    ecr_client_param,
+    sts_client_param,
+    region,
+):
     account_id = sts_client_param.get_caller_identity()["Account"]
     ecr_uri = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
-    
+
     try:
         print(f"Verificando repositório ECR: {repo_name}")
         ecr_client_param.create_repository(repositoryName=repo_name)
     except ClientError as e:
-        if e.response['Error']['Code'] != 'RepositoryAlreadyExistsException':
+        if e.response["Error"]["Code"] != "RepositoryAlreadyExistsException":
             raise e
 
-    # Lógica de Cache Inteligente (Hashing)
-    service_dir = dockerfile_path.parent
-    dir_hash = get_dir_hash(service_dir)
-    image_tag = f"hash-{dir_hash}"
-
-    try:
-        # Tenta achar a imagem com essa exata assinatura no ECR
-        ecr_client_param.describe_images(
-            repositoryName=repo_name,
-            imageIds=[{'imageTag': image_tag}]
-        )
-        print(f"[{repo_name}] Nenhuma alteração de código detectada. Pulando o Build e Push! (Reaproveitando imagem)")
-        return ecr_uri
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ImageNotFoundException':
-            pass # Se não achou, código mudou (ou é a primeira vez). Segue o jogo.
-        else:
-            raise e
-
-    print(f"[{repo_name}] Alterações detectadas. Iniciando Build e Push...")
+    print(f"[{repo_name}] Iniciando Build e Push")
     auth_token = ecr_client_param.get_authorization_token()
-    token = auth_token['authorizationData'][0]['authorizationToken']
-    username, password = base64.b64decode(token).decode('utf-8').split(':')
-    registry = auth_token['authorizationData'][0]['proxyEndpoint']
+    token = auth_token["authorizationData"][0]["authorizationToken"]
+    username, password = base64.b64decode(token).decode("utf-8").split(":")
+    registry = auth_token["authorizationData"][0]["proxyEndpoint"]
+
+    # Login no ECR com --password-stdin e tratamento para evitar erro de credenciais (pass) no Linux
+    login_cmd = [
+        "docker",
+        "login",
+        "--username",
+        username,
+        "--password-stdin",
+        registry,
+    ]
+    env = build_docker_env()
+    os.makedirs(env["DOCKER_CONFIG"], exist_ok=True)
 
     subprocess.run(
-        ["docker", "login", "--username", username, "--password-stdin", registry],
-        input=password.encode('utf-8'),
-        check=True, stdout=subprocess.DEVNULL
+        login_cmd,
+        input=password.encode("utf-8"),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
     )
-    
-    subprocess.run(["docker", "build", "-t", repo_name, "-f", str(dockerfile_path), str(context_dir)], check=True)
-    
-    # Taggea como latest (pro ECS rodar) e como hash (pro nosso script cachear depois)
-    subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"], check=True)
-    subprocess.run(["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:{image_tag}"], check=True)
-    
-    # Push com retry (Docker Desktop às vezes tem falhas de rede transientes)
-    for tag in ["latest", image_tag]:
-        full_uri = f"{ecr_uri}:{tag}"
-        for attempt in range(3):
-            result = subprocess.run(["docker", "push", full_uri])
-            if result.returncode == 0:
-                break
-            print(f"  ⚠️ Push falhou (tentativa {attempt+1}/3) para {tag}. Aguardando 10s...")
-            time.sleep(10)
-        else:
-            raise Exception(f"Falha ao push {full_uri} após 3 tentativas")
-    
+
+    subprocess.run(
+        [
+            "docker",
+            "build",
+            "-t",
+            repo_name,
+            "-f",
+            str(dockerfile_path),
+            str(context_dir),
+        ],
+        check=True,
+        env=env,
+    )
+
+    # Taggea como latest (pro ECS rodar)
+    subprocess.run(
+        ["docker", "tag", f"{repo_name}:latest", f"{ecr_uri}:latest"],
+        check=True,
+        env=env,
+    )
+
+    subprocess.run(
+        ["docker", "push", f"{ecr_uri}:latest"], check=True, env=env
+    )
+
     return ecr_uri
 
 
 def setup_dynamodb():
     print(f"Configurando DynamoDB: {DYNAMODB_TABLE_NAME}")
-    dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+    dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
     try:
         table = dynamodb.create_table(
             TableName=DYNAMODB_TABLE_NAME,
-            BillingMode='PAY_PER_REQUEST',
+            BillingMode="PAY_PER_REQUEST",
             AttributeDefinitions=[
-                {'AttributeName': 'PK', 'AttributeType': 'S'},
-                {'AttributeName': 'SK', 'AttributeType': 'S'},
-                {'AttributeName': 'GSI1PK', 'AttributeType': 'S'},
-                {'AttributeName': 'GSI1SK', 'AttributeType': 'S'},
-                {'AttributeName': 'GSI2PK', 'AttributeType': 'S'},
-                {'AttributeName': 'GSI2SK', 'AttributeType': 'S'},
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "GSI1PK", "AttributeType": "S"},
+                {"AttributeName": "GSI1SK", "AttributeType": "S"},
+                {"AttributeName": "GSI2PK", "AttributeType": "S"},
+                {"AttributeName": "GSI2SK", "AttributeType": "S"},
             ],
             KeySchema=[
-                {'AttributeName': 'PK', 'KeyType': 'HASH'},
-                {'AttributeName': 'SK', 'KeyType': 'RANGE'}
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
             ],
             GlobalSecondaryIndexes=[
                 {
-                    'IndexName': 'UserIndex',
-                    'KeySchema': [
-                        {'AttributeName': 'GSI1PK', 'KeyType': 'HASH'},
-                        {'AttributeName': 'GSI1SK', 'KeyType': 'RANGE'}
+                    "IndexName": "UserIndex",
+                    "KeySchema": [
+                        {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
                     ],
-                    'Projection': {'ProjectionType': 'ALL'}
+                    "Projection": {"ProjectionType": "ALL"},
                 },
                 {
-                    'IndexName': 'StatusIndex',
-                    'KeySchema': [
-                        {'AttributeName': 'GSI2PK', 'KeyType': 'HASH'},
-                        {'AttributeName': 'GSI2SK', 'KeyType': 'RANGE'}
+                    "IndexName": "StatusIndex",
+                    "KeySchema": [
+                        {"AttributeName": "GSI2PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI2SK", "KeyType": "RANGE"},
                     ],
-                    'Projection': {'ProjectionType': 'ALL'}
-                }
-            ]
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
         )
-        print(f"Aguardando criação da tabela {DYNAMODB_TABLE_NAME}...")
-        table.meta.client.get_waiter('table_exists').wait(TableName=DYNAMODB_TABLE_NAME)
+        print(f"Aguardando criação da tabela {DYNAMODB_TABLE_NAME}")
+        table.meta.client.get_waiter("table_exists").wait(
+            TableName=DYNAMODB_TABLE_NAME
+        )
         print("Tabela criada com sucesso.")
     except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceInUseException':
+        if e.response["Error"]["Code"] == "ResourceInUseException":
             print(f"Tabela {DYNAMODB_TABLE_NAME} já existe.")
         else:
             raise e
 
-def setup_auto_scaling(service_name, policy_type='cpu', tg_arn=None, alb_arn=None):
+
+def setup_auto_scaling(
+    service_name, policy_type="cpu", tg_arn=None, alb_arn=None
+):
     app_autoscaling.register_scalable_target(
-        ServiceNamespace='ecs',
-        ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-        ScalableDimension='ecs:service:DesiredCount',
+        ServiceNamespace="ecs",
+        ResourceId=f"service/{CLUSTER_NAME}/{service_name}",
+        ScalableDimension="ecs:service:DesiredCount",
         MinCapacity=AS_MIN_CAPACITY,
-        MaxCapacity=AS_MAX_CAPACITY
+        MaxCapacity=AS_MAX_CAPACITY,
     )
 
-    if policy_type == 'cpu':
+    if policy_type == "cpu":
         app_autoscaling.put_scaling_policy(
-            PolicyName=f'{service_name}-cpu-scaling',
-            ServiceNamespace='ecs',
-            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-            ScalableDimension='ecs:service:DesiredCount',
-            PolicyType='TargetTrackingScaling',
+            PolicyName=f"{service_name}-cpu-scaling",
+            ServiceNamespace="ecs",
+            ResourceId=f"service/{CLUSTER_NAME}/{service_name}",
+            ScalableDimension="ecs:service:DesiredCount",
+            PolicyType="TargetTrackingScaling",
             TargetTrackingScalingPolicyConfiguration={
-                'TargetValue': AS_TARGET_VALUE_CPU,
-                'PredefinedMetricSpecification': {
-                    'PredefinedMetricType': 'ECSServiceAverageCPUUtilization'
+                "TargetValue": AS_TARGET_VALUE_CPU,
+                "PredefinedMetricSpecification": {
+                    "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
                 },
-                'ScaleOutCooldown': AS_SCALE_OUT_COOLDOWN,
-                'ScaleInCooldown': AS_SCALE_IN_COOLDOWN
-            }
+                "ScaleOutCooldown": AS_SCALE_OUT_COOLDOWN,
+                "ScaleInCooldown": AS_SCALE_IN_COOLDOWN,
+            },
         )
-    elif policy_type == 'alb_request':
-        alb_suffix = alb_arn.split('loadbalancer/')[-1]
-        tg_suffix = tg_arn.split(':', 5)[-1]
+    elif policy_type == "alb_request":
+        alb_suffix = alb_arn.split("loadbalancer/")[-1]
+        tg_suffix = tg_arn.split(":", 5)[-1]
         resource_label = f"{alb_suffix}/{tg_suffix}"
 
         app_autoscaling.put_scaling_policy(
-            PolicyName=f'{service_name}-alb-req-scaling',
-            ServiceNamespace='ecs',
-            ResourceId=f'service/{CLUSTER_NAME}/{service_name}',
-            ScalableDimension='ecs:service:DesiredCount',
-            PolicyType='TargetTrackingScaling',
+            PolicyName=f"{service_name}-alb-req-scaling",
+            ServiceNamespace="ecs",
+            ResourceId=f"service/{CLUSTER_NAME}/{service_name}",
+            ScalableDimension="ecs:service:DesiredCount",
+            PolicyType="TargetTrackingScaling",
             TargetTrackingScalingPolicyConfiguration={
-                'TargetValue': AS_TARGET_VALUE_REQ,
-                'PredefinedMetricSpecification': {
-                    'PredefinedMetricType': 'ALBRequestCountPerTarget',
-                    'ResourceLabel': resource_label
+                "TargetValue": AS_TARGET_VALUE_REQ,
+                "PredefinedMetricSpecification": {
+                    "PredefinedMetricType": "ALBRequestCountPerTarget",
+                    "ResourceLabel": resource_label,
                 },
-                'ScaleOutCooldown': AS_SCALE_OUT_COOLDOWN,
-                'ScaleInCooldown': AS_SCALE_IN_COOLDOWN
-            }
+                "ScaleOutCooldown": AS_SCALE_OUT_COOLDOWN,
+                "ScaleInCooldown": AS_SCALE_IN_COOLDOWN,
+            },
         )
 
-def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpoint, sg_id):
+
+def deploy_api_to_ecs(
+    ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpoint, sg_id
+):
     account_id = sts_client.get_caller_identity()["Account"]
-    role_arn = f"arn:aws:iam::{account_id}:role/LabRole" 
-    
+    role_arn = f"arn:aws:iam::{account_id}:role/LabRole"
+
     print("Criando cluster ECS Fargate.")
     try:
         ecs_client.create_cluster(clusterName=CLUSTER_NAME)
     except Exception:
         pass
-    
+
     print("Registrando Task Definition de Cadastro.")
     ecs_client.register_task_definition(
         family=TASK_CADASTRO_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu="256", memory="512",
-        executionRoleArn=role_arn, taskRoleArn=role_arn,
-        containerDefinitions=[{
-            "name": "cadastro-container",
-            "image": f"{ecr_uri_cadastro}:latest",
-            "portMappings": [{"containerPort": API_PORT_CADASTRO, "hostPort": API_PORT_CADASTRO}],
-            "environment": [
-                {"name": "DB_HOST", "value": db_endpoint},
-                {"name": "DB_NAME", "value": DB_NAME},
-                {"name": "DB_USER", "value": DB_USER},
-                {"name": "DB_PASS", "value": DB_PASSWORD},
-                {"name": "DB_MIN_CONN", "value": "1"},
-                {"name": "DB_MAX_CONN", "value": "15"}
-            ],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": f"/ecs/{REPO_CADASTRO}",
-                    "awslogs-region": AWS_REGION,
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
-                }
+        cpu="256",
+        memory="512",
+        executionRoleArn=role_arn,
+        taskRoleArn=role_arn,
+        containerDefinitions=[
+            {
+                "name": "cadastro-container",
+                "image": f"{ecr_uri_cadastro}:latest",
+                "portMappings": [
+                    {
+                        "containerPort": API_PORT_CADASTRO,
+                        "hostPort": API_PORT_CADASTRO,
+                    }
+                ],
+                "environment": [
+                    {"name": "DB_HOST", "value": db_endpoint},
+                    {"name": "DB_NAME", "value": DB_NAME},
+                    {"name": "DB_USER", "value": DB_USER},
+                    {"name": "DB_PASS", "value": DB_PASSWORD},
+                    {"name": "DB_MIN_CONN", "value": "1"},
+                    {"name": "DB_MAX_CONN", "value": "15"},
+                ],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": f"/ecs/{REPO_CADASTRO}",
+                        "awslogs-region": AWS_REGION,
+                        "awslogs-stream-prefix": "ecs",
+                        "awslogs-create-group": "true",
+                    },
+                },
             }
-        }]
+        ],
     )
 
     print("Registrando Task Definition de Rotas.")
@@ -474,22 +531,31 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
         family=TASK_ROTAS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu=TASK_CPU, memory=TASK_MEMORY,
-        executionRoleArn=role_arn, taskRoleArn=role_arn,
-        containerDefinitions=[{
-            "name": "rotas-container",
-            "image": f"{ecr_uri_rotas}:latest",
-            "portMappings": [{"containerPort": API_PORT_ROTAS, "hostPort": API_PORT_ROTAS}],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": f"/ecs/{REPO_ROTAS}",
-                    "awslogs-region": AWS_REGION,
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
-                }
+        cpu=TASK_CPU,
+        memory=TASK_MEMORY,
+        executionRoleArn=role_arn,
+        taskRoleArn=role_arn,
+        containerDefinitions=[
+            {
+                "name": "rotas-container",
+                "image": f"{ecr_uri_rotas}:latest",
+                "portMappings": [
+                    {
+                        "containerPort": API_PORT_ROTAS,
+                        "hostPort": API_PORT_ROTAS,
+                    }
+                ],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": f"/ecs/{REPO_ROTAS}",
+                        "awslogs-region": AWS_REGION,
+                        "awslogs-stream-prefix": "ecs",
+                        "awslogs-create-group": "true",
+                    },
+                },
             }
-        }]
+        ],
     )
 
     print("Registrando Task Definition de Pedidos.")
@@ -497,232 +563,382 @@ def deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, db_endpo
         family=TASK_PEDIDOS_FAMILY,
         networkMode=TASK_NETWORK_MODE,
         requiresCompatibilities=["FARGATE"],
-        cpu="256", memory="512",
-        executionRoleArn=role_arn, taskRoleArn=role_arn,
-        containerDefinitions=[{
-            "name": "pedidos-container",
-            "image": f"{ecr_uri_pedidos}:latest",
-            "portMappings": [{"containerPort": API_PORT_PEDIDOS, "hostPort": API_PORT_PEDIDOS}],
-            "environment": [
-                {"name": "AWS_REGION", "value": AWS_REGION},
-                {"name": "DYNAMODB_TABLE_NAME", "value": DYNAMODB_TABLE_NAME},
-                {"name": "ROOT_PATH", "value": "/pedidos"}
-            ],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": f"/ecs/{REPO_PEDIDOS}",
-                    "awslogs-region": AWS_REGION,
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
-                }
+        cpu="256",
+        memory="512",
+        executionRoleArn=role_arn,
+        taskRoleArn=role_arn,
+        containerDefinitions=[
+            {
+                "name": "pedidos-container",
+                "image": f"{ecr_uri_pedidos}:latest",
+                "portMappings": [
+                    {
+                        "containerPort": API_PORT_PEDIDOS,
+                        "hostPort": API_PORT_PEDIDOS,
+                    }
+                ],
+                "environment": [
+                    {"name": "AWS_REGION", "value": AWS_REGION},
+                    {
+                        "name": "DYNAMODB_TABLE_NAME",
+                        "value": DYNAMODB_TABLE_NAME,
+                    },
+                    {"name": "ROOT_PATH", "value": "/pedidos"},
+                ],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": f"/ecs/{REPO_PEDIDOS}",
+                        "awslogs-region": AWS_REGION,
+                        "awslogs-stream-prefix": "ecs",
+                        "awslogs-create-group": "true",
+                    },
+                },
             }
-        }]
+        ],
     )
-    
-    vpcs = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-    vpc_id = vpcs['Vpcs'][0]['VpcId']
-    subnets = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}])
-    subnet_ids = [s['SubnetId'] for s in subnets['Subnets'][:2]]
-    
+
+    vpcs = ec2_client.describe_vpcs(
+        Filters=[{"Name": "isDefault", "Values": ["true"]}]
+    )
+    vpc_id = vpcs["Vpcs"][0]["VpcId"]
+    subnets = ec2_client.describe_subnets(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+    )
+    subnet_ids = [s["SubnetId"] for s in subnets["Subnets"][:2]]
+
     print("Criando/Verificando ALB e Listeners.")
     try:
         alb_response = elbv2_client.create_load_balancer(
-            Name=ALB_NAME, Subnets=subnet_ids, SecurityGroups=[sg_id],
-            Scheme=ALB_SCHEME, Type=ALB_TYPE, IpAddressType=ALB_IP_ADDRESS_TYPE
+            Name=ALB_NAME,
+            Subnets=subnet_ids,
+            SecurityGroups=[sg_id],
+            Scheme=ALB_SCHEME,
+            Type=ALB_TYPE,
+            IpAddressType=ALB_IP_ADDRESS_TYPE,
         )
-        alb_arn = alb_response['LoadBalancers'][0]['LoadBalancerArn']
-        alb_dns = alb_response['LoadBalancers'][0]['DNSName']
+        alb_arn = alb_response["LoadBalancers"][0]["LoadBalancerArn"]
+        alb_dns = alb_response["LoadBalancers"][0]["DNSName"]
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DuplicateLoadBalancerName':
+        if e.response["Error"]["Code"] == "DuplicateLoadBalancerName":
             albs = elbv2_client.describe_load_balancers(Names=[ALB_NAME])
-            alb_arn = albs['LoadBalancers'][0]['LoadBalancerArn']
-            alb_dns = albs['LoadBalancers'][0]['DNSName']
+            alb_arn = albs["LoadBalancers"][0]["LoadBalancerArn"]
+            alb_dns = albs["LoadBalancers"][0]["DNSName"]
         else:
             raise e
-    
-    waiter = elbv2_client.get_waiter('load_balancer_available')
+
+    waiter = elbv2_client.get_waiter("load_balancer_available")
     waiter.wait(LoadBalancerArns=[alb_arn])
-    
+
     # Target Group Cadastro
     try:
         tg_cad_resp = elbv2_client.create_target_group(
-            Name=TG_CADASTRO_NAME, Protocol='HTTP', Port=API_PORT_CADASTRO, VpcId=vpc_id, TargetType='ip',
-            HealthCheckProtocol='HTTP', HealthCheckPath='/cadastro/health', HealthCheckIntervalSeconds=30
+            Name=TG_CADASTRO_NAME,
+            Protocol="HTTP",
+            Port=API_PORT_CADASTRO,
+            VpcId=vpc_id,
+            TargetType="ip",
+            HealthCheckProtocol="HTTP",
+            HealthCheckPath="/cadastro/health",
+            HealthCheckIntervalSeconds=30,
         )
-        tg_cad_arn = tg_cad_resp['TargetGroups'][0]['TargetGroupArn']
+        tg_cad_arn = tg_cad_resp["TargetGroups"][0]["TargetGroupArn"]
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+        if e.response["Error"]["Code"] == "DuplicateTargetGroupName":
             tgs = elbv2_client.describe_target_groups(Names=[TG_CADASTRO_NAME])
-            tg_cad_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+            tg_cad_arn = tgs["TargetGroups"][0]["TargetGroupArn"]
         else:
             raise e
 
     # Target Group Rotas
     try:
         tg_rotas_resp = elbv2_client.create_target_group(
-            Name=TG_ROTAS_NAME, Protocol='HTTP', Port=API_PORT_ROTAS, VpcId=vpc_id, TargetType='ip',
-            HealthCheckProtocol='HTTP', HealthCheckPath='/rotas/health', HealthCheckIntervalSeconds=30
+            Name=TG_ROTAS_NAME,
+            Protocol="HTTP",
+            Port=API_PORT_ROTAS,
+            VpcId=vpc_id,
+            TargetType="ip",
+            HealthCheckProtocol="HTTP",
+            HealthCheckPath="/rotas/health",
+            HealthCheckIntervalSeconds=30,
         )
-        tg_rotas_arn = tg_rotas_resp['TargetGroups'][0]['TargetGroupArn']
+        tg_rotas_arn = tg_rotas_resp["TargetGroups"][0]["TargetGroupArn"]
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+        if e.response["Error"]["Code"] == "DuplicateTargetGroupName":
             tgs = elbv2_client.describe_target_groups(Names=[TG_ROTAS_NAME])
-            tg_rotas_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+            tg_rotas_arn = tgs["TargetGroups"][0]["TargetGroupArn"]
         else:
             raise e
 
     # Target Group Pedidos
     try:
         tg_ped_resp = elbv2_client.create_target_group(
-            Name=TG_PEDIDOS_NAME, Protocol='HTTP', Port=API_PORT_PEDIDOS, VpcId=vpc_id, TargetType='ip',
-            HealthCheckProtocol='HTTP', HealthCheckPath='/pedidos/health', HealthCheckIntervalSeconds=30
+            Name=TG_PEDIDOS_NAME,
+            Protocol="HTTP",
+            Port=API_PORT_PEDIDOS,
+            VpcId=vpc_id,
+            TargetType="ip",
+            HealthCheckProtocol="HTTP",
+            HealthCheckPath="/pedidos/health",
+            HealthCheckIntervalSeconds=30,
         )
-        tg_ped_arn = tg_ped_resp['TargetGroups'][0]['TargetGroupArn']
+        tg_ped_arn = tg_ped_resp["TargetGroups"][0]["TargetGroupArn"]
     except ClientError as e:
-        if e.response['Error']['Code'] == 'DuplicateTargetGroupName':
+        if e.response["Error"]["Code"] == "DuplicateTargetGroupName":
             tgs = elbv2_client.describe_target_groups(Names=[TG_PEDIDOS_NAME])
-            tg_ped_arn = tgs['TargetGroups'][0]['TargetGroupArn']
+            tg_ped_arn = tgs["TargetGroups"][0]["TargetGroupArn"]
         else:
             raise e
-    
+
     # Listener
-    listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)['Listeners']
-    listener_arn = next((l['ListenerArn'] for l in listeners if l['Port'] == ALB_PORT), None)
+    listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_arn)[
+        "Listeners"
+    ]
+    listener_arn = next(
+        (l["ListenerArn"] for l in listeners if l["Port"] == ALB_PORT), None
+    )
 
     if not listener_arn:
         listener_resp = elbv2_client.create_listener(
-            LoadBalancerArn=alb_arn, Protocol='HTTP', Port=ALB_PORT,
-            DefaultActions=[{'Type': 'forward', 'TargetGroupArn': tg_cad_arn}]
+            LoadBalancerArn=alb_arn,
+            Protocol="HTTP",
+            Port=ALB_PORT,
+            DefaultActions=[{"Type": "forward", "TargetGroupArn": tg_cad_arn}],
         )
-        listener_arn = listener_resp['Listeners'][0]['ListenerArn']
-    
+        listener_arn = listener_resp["Listeners"][0]["ListenerArn"]
+
     # Rules
-    rules = elbv2_client.describe_rules(ListenerArn=listener_arn)['Rules']
-    
+    rules = elbv2_client.describe_rules(ListenerArn=listener_arn)["Rules"]
+
     # Regra Rotas
-    if not any(r.get('Priority') == '10' for r in rules):
+    if not any(r.get("Priority") == "10" for r in rules):
         elbv2_client.create_rule(
             ListenerArn=listener_arn,
-            Conditions=[{'Field': 'path-pattern', 'Values': ['/rotas*', '/route*']}],
+            Conditions=[
+                {"Field": "path-pattern", "Values": ["/rotas*", "/route*"]}
+            ],
             Priority=10,
-            Actions=[{'Type': 'forward', 'TargetGroupArn': tg_rotas_arn}]
+            Actions=[{"Type": "forward", "TargetGroupArn": tg_rotas_arn}],
         )
 
     # Regra Pedidos
-    if not any(r.get('Priority') == '20' for r in rules):
+    if not any(r.get("Priority") == "20" for r in rules):
         elbv2_client.create_rule(
             ListenerArn=listener_arn,
-            Conditions=[{'Field': 'path-pattern', 'Values': ['/pedidos*']}],
+            Conditions=[{"Field": "path-pattern", "Values": ["/pedidos*"]}],
             Priority=20,
-            Actions=[{'Type': 'forward', 'TargetGroupArn': tg_ped_arn}]
+            Actions=[{"Type": "forward", "TargetGroupArn": tg_ped_arn}],
         )
-    
+
     print("Iniciando/Atualizando ECS Services.")
 
-    def create_or_update_service(service_name, task_family, tg_arn, container_name, container_port, policy_type='cpu'):
+    def create_or_update_service(
+        service_name,
+        task_family,
+        tg_arn,
+        container_name,
+        container_port,
+        policy_type="cpu",
+    ):
         try:
-            response = ecs_client.describe_services(cluster=CLUSTER_NAME, services=[service_name])
-            if response['services']:
-                status = response['services'][0]['status']
-                
-                if status == 'ACTIVE':
+            response = ecs_client.describe_services(
+                cluster=CLUSTER_NAME, services=[service_name]
+            )
+            if response["services"]:
+                status = response["services"][0]["status"]
+
+                if status == "ACTIVE":
                     print(f"Serviço '{service_name}' já existe. Atualizando.")
                     ecs_client.update_service(
                         cluster=CLUSTER_NAME,
                         service=service_name,
                         taskDefinition=task_family,
-                        forceNewDeployment=True
+                        forceNewDeployment=True,
                     )
-                elif status == 'DRAINING':
-                    print(f"Serviço '{service_name}' está sendo deletado (DRAINING). Aguardando inatividade...")
-                    waiter = ecs_client.get_waiter('services_inactive')
+                elif status == "DRAINING":
+                    print(
+                        f"Serviço '{service_name}' está sendo deletado (DRAINING). Aguardando inatividade"
+                    )
+                    waiter = ecs_client.get_waiter("services_inactive")
                     waiter.wait(cluster=CLUSTER_NAME, services=[service_name])
-                    
-                    print(f"Criando novo serviço '{service_name}'...")
+
+                    print(f"Criando novo serviço '{service_name}'")
                     ecs_client.create_service(
-                        cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
-                        desiredCount=3, launchType="FARGATE",
-                        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
-                        loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                        cluster=CLUSTER_NAME,
+                        serviceName=service_name,
+                        taskDefinition=task_family,
+                        desiredCount=3,
+                        launchType="FARGATE",
+                        networkConfiguration={
+                            "awsvpcConfiguration": {
+                                "subnets": subnet_ids,
+                                "securityGroups": [sg_id],
+                                "assignPublicIp": "ENABLED",
+                            }
+                        },
+                        loadBalancers=[
+                            {
+                                "targetGroupArn": tg_arn,
+                                "containerName": container_name,
+                                "containerPort": container_port,
+                            }
+                        ],
                     )
-                else: # INACTIVE
+                else:  # INACTIVE
                     print(f"Criando novo serviço '{service_name}'.")
                     ecs_client.create_service(
-                        cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
-                        desiredCount=3, launchType="FARGATE",
-                        networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
-                        loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                        cluster=CLUSTER_NAME,
+                        serviceName=service_name,
+                        taskDefinition=task_family,
+                        desiredCount=3,
+                        launchType="FARGATE",
+                        networkConfiguration={
+                            "awsvpcConfiguration": {
+                                "subnets": subnet_ids,
+                                "securityGroups": [sg_id],
+                                "assignPublicIp": "ENABLED",
+                            }
+                        },
+                        loadBalancers=[
+                            {
+                                "targetGroupArn": tg_arn,
+                                "containerName": container_name,
+                                "containerPort": container_port,
+                            }
+                        ],
                     )
             else:
                 print(f"Criando novo serviço '{service_name}'.")
                 ecs_client.create_service(
-                    cluster=CLUSTER_NAME, serviceName=service_name, taskDefinition=task_family,
-                    desiredCount=3, launchType="FARGATE",
-                    networkConfiguration={"awsvpcConfiguration": {"subnets": subnet_ids, "securityGroups": [sg_id], "assignPublicIp": "ENABLED"}},
-                    loadBalancers=[{"targetGroupArn": tg_arn, "containerName": container_name, "containerPort": container_port}]
+                    cluster=CLUSTER_NAME,
+                    serviceName=service_name,
+                    taskDefinition=task_family,
+                    desiredCount=3,
+                    launchType="FARGATE",
+                    networkConfiguration={
+                        "awsvpcConfiguration": {
+                            "subnets": subnet_ids,
+                            "securityGroups": [sg_id],
+                            "assignPublicIp": "ENABLED",
+                        }
+                    },
+                    loadBalancers=[
+                        {
+                            "targetGroupArn": tg_arn,
+                            "containerName": container_name,
+                            "containerPort": container_port,
+                        }
+                    ],
                 )
-                
-            setup_auto_scaling(service_name, policy_type=policy_type, tg_arn=tg_arn, alb_arn=alb_arn)
+
+            setup_auto_scaling(
+                service_name,
+                policy_type=policy_type,
+                tg_arn=tg_arn,
+                alb_arn=alb_arn,
+            )
 
         except ClientError as e:
-            if e.response['Error']['Code'] == 'InvalidParameterException' and 'already exists' in e.response['Error']['Message']:
-                print(f"Aviso: Serviço '{service_name}' detectado via erro de redundância. Forçando update.")
-                ecs_client.update_service(
-                    cluster=CLUSTER_NAME, service=service_name, 
-                    taskDefinition=task_family, forceNewDeployment=True
+            if (
+                e.response["Error"]["Code"] == "InvalidParameterException"
+                and "already exists" in e.response["Error"]["Message"]
+            ):
+                print(
+                    f"Aviso: Serviço '{service_name}' detectado via erro de redundância. Forçando update."
                 )
-                setup_auto_scaling(service_name, policy_type=policy_type, tg_arn=tg_arn, alb_arn=alb_arn)
+                ecs_client.update_service(
+                    cluster=CLUSTER_NAME,
+                    service=service_name,
+                    taskDefinition=task_family,
+                    forceNewDeployment=True,
+                )
+                setup_auto_scaling(
+                    service_name,
+                    policy_type=policy_type,
+                    tg_arn=tg_arn,
+                    alb_arn=alb_arn,
+                )
             else:
                 raise e
 
-    create_or_update_service("dijkfood-cadastro-service", TASK_CADASTRO_FAMILY, tg_cad_arn, "cadastro-container", API_PORT_CADASTRO, policy_type='alb_request')
-    create_or_update_service("dijkfood-rotas-service", TASK_ROTAS_FAMILY, tg_rotas_arn, "rotas-container", API_PORT_ROTAS, policy_type='cpu')
-    create_or_update_service("dijkfood-pedidos-service", TASK_PEDIDOS_FAMILY, tg_ped_arn, "pedidos-container", API_PORT_PEDIDOS, policy_type='cpu')
-    
-    print("Aguardando Serviços ficarem online (pode levar 5-10 min)...")
-    all_services = ["dijkfood-cadastro-service", "dijkfood-rotas-service", "dijkfood-pedidos-service"]
+    create_or_update_service(
+        "dijkfood-cadastro-service",
+        TASK_CADASTRO_FAMILY,
+        tg_cad_arn,
+        "cadastro-container",
+        API_PORT_CADASTRO,
+        policy_type="alb_request",
+    )
+    create_or_update_service(
+        "dijkfood-rotas-service",
+        TASK_ROTAS_FAMILY,
+        tg_rotas_arn,
+        "rotas-container",
+        API_PORT_ROTAS,
+        policy_type="cpu",
+    )
+    create_or_update_service(
+        "dijkfood-pedidos-service",
+        TASK_PEDIDOS_FAMILY,
+        tg_ped_arn,
+        "pedidos-container",
+        API_PORT_PEDIDOS,
+        policy_type="cpu",
+    )
+
+    print("Aguardando serviços ficarem online (pode levar 5-10 min)")
+    all_services = [
+        "dijkfood-cadastro-service",
+        "dijkfood-rotas-service",
+        "dijkfood-pedidos-service",
+    ]
     for attempt in range(40):
-        resp = ecs_client.describe_services(cluster=CLUSTER_NAME, services=all_services)
+        resp = ecs_client.describe_services(
+            cluster=CLUSTER_NAME, services=all_services
+        )
         all_ready = True
+        service_statuses = []
         for svc in resp.get("services", []):
             name = svc["serviceName"]
             running = svc.get("runningCount", 0)
             desired = svc.get("desiredCount", 0)
-            deployments = len(svc.get("deployments", []))
             ready = running >= desired and running > 0
-            icon = "✅" if ready else "⏳"
-            extra = f" ({deployments} deploys drenando)" if deployments > 1 else ""
-            print(f"  {icon} {name}: {running}/{desired} running{extra}")
+            service_statuses.append((name, running, desired, ready))
             if not ready:
                 all_ready = False
         if all_ready:
-            print("  ✅ Todos os serviços com tasks rodando! Prosseguindo.")
+            print("Serviços prontos. Status final:")
+            for name, running, desired, _ in service_statuses:
+                print(f"  {name}: {running}/{desired} running")
+            print("Todos os serviços com tasks rodando. Prosseguindo.")
             break
-        print(f"  Tentativa {attempt+1}/40 — aguardando 15s...")
+        if attempt == 0 or (attempt + 1) % 5 == 0:
+            print(f"  Tentativa {attempt + 1}/40: aguardando serviços")
         time.sleep(15)
     else:
-        print("  ⚠️ Timeout — prosseguindo mesmo assim...")
-    
-    print(f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos")
+        print("Timeout atingido. Prosseguindo mesmo assim")
+
+    print(
+        f"Deploy Unificado Concluído! \nAPI Cadastro: http://{alb_dns} \nAPI Rotas: http://{alb_dns}/rotas \nAPI Pedidos: http://{alb_dns}/pedidos"
+    )
 
     # Salva os endpoints para o Seed e para a UI
     endpoints = {
         "cadastro": f"http://{alb_dns}",
         "rotas": f"http://{alb_dns}",
-        "pedidos": f"http://{alb_dns}"
+        "pedidos": f"http://{alb_dns}",
     }
-    
+
     with open(ROOT_DIR / "alb_endpoints.json", "w") as f:
         json.dump(endpoints, f, indent=2)
-    
+
     # Também copia para a pasta public do Vite para que a UI carregue via fetch
     public_dir = ROOT_DIR / "demo-ui" / "public"
     if public_dir.exists():
         with open(public_dir / "alb_endpoints.json", "w") as f:
             json.dump(endpoints, f, indent=2)
-            
-    print(f"Arquivo alb_endpoints.json atualizado na raiz e em demo-ui/public/")
+
+    print("Arquivo alb_endpoints.json atualizado na raiz e em demo-ui/public/")
     return alb_dns
 
 
@@ -735,50 +951,78 @@ def main():
         print()
 
         sg_id = setup_security_group()
-        
+
         endpoint = get_or_create_rds_instance(sg_id)
         run_ddl_only(endpoint)
 
         setup_dynamodb()
-        
-        ecr_uri_cadastro = build_and_push_docker_image(REPO_CADASTRO, DOCKERFILE_CADASTRO, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
-        ecr_uri_rotas = build_and_push_docker_image(REPO_ROTAS, DOCKERFILE_ROTAS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
-        ecr_uri_pedidos = build_and_push_docker_image(REPO_PEDIDOS, DOCKERFILE_PEDIDOS, ROOT_DIR, ecr_client, sts_client, AWS_REGION)
-        
-        alb_dns = deploy_api_to_ecs(ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, endpoint, sg_id)
-        
+
+        ecr_uri_cadastro = build_and_push_docker_image(
+            REPO_CADASTRO,
+            DOCKERFILE_CADASTRO,
+            ROOT_DIR,
+            ecr_client,
+            sts_client,
+            AWS_REGION,
+        )
+        ecr_uri_rotas = build_and_push_docker_image(
+            REPO_ROTAS,
+            DOCKERFILE_ROTAS,
+            ROOT_DIR,
+            ecr_client,
+            sts_client,
+            AWS_REGION,
+        )
+        ecr_uri_pedidos = build_and_push_docker_image(
+            REPO_PEDIDOS,
+            DOCKERFILE_PEDIDOS,
+            ROOT_DIR,
+            ecr_client,
+            sts_client,
+            AWS_REGION,
+        )
+
+        alb_dns = deploy_api_to_ecs(
+            ecr_uri_cadastro, ecr_uri_rotas, ecr_uri_pedidos, endpoint, sg_id
+        )
+
         print("\n" + "=" * 60)
         print("DEPLOY FINALIZADO COM SUCESSO")
         print("=" * 60)
         print(f"API Cadastro Health: http://{alb_dns}/cadastro/health")
         print(f"API Rotas Health:    http://{alb_dns}/rotas/health")
-        print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health") 
+        print(f"API Pedidos Health:  http://{alb_dns}/pedidos/health")
         print("=" * 60)
-        
+
         # Busca dados de rede para salvar no output (usado pelo deploy de simuladores)
-        vpcs_out = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-        vpc_id_out = vpcs_out['Vpcs'][0]['VpcId']
-        subnets_out = ec2_client.describe_subnets(Filters=[{'Name': 'vpc-id', 'Values': [vpc_id_out]}])
-        subnet_ids_out = [s['SubnetId'] for s in subnets_out['Subnets'][:2]]
+        vpcs_out = ec2_client.describe_vpcs(
+            Filters=[{"Name": "isDefault", "Values": ["true"]}]
+        )
+        vpc_id_out = vpcs_out["Vpcs"][0]["VpcId"]
+        subnets_out = ec2_client.describe_subnets(
+            Filters=[{"Name": "vpc-id", "Values": [vpc_id_out]}]
+        )
+        subnet_ids_out = [s["SubnetId"] for s in subnets_out["Subnets"][:2]]
 
         deploy_data = {
             "API_URL": f"http://{alb_dns}",
             "ALB_DNS": alb_dns,
             "SG_ID": sg_id,
             "VPC_ID": vpc_id_out,
-            "SUBNET_IDS": subnet_ids_out
+            "SUBNET_IDS": subnet_ids_out,
         }
-        
-        with open(OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
+
+        with open(OUTPUT_JSON_PATH, "w", encoding="utf-8") as f:
             json.dump(deploy_data, f, indent=4)
-            
+
         print(f"\nInformações de conexão salvas em: {OUTPUT_JSON_PATH.name}")
         print("=" * 60)
 
-        print("\nIniciando carga inicial no banco de dados...")
-        print("Executando seed_db.py para popular o banco via APIs...")
+        print("\nIniciando carga inicial no banco de dados")
+        print("Executando seed_db.py para popular o banco via APIs")
         try:
             import sys
+
             subprocess.run([sys.executable, str(SEED_PATH)], check=True)
             print("População do banco concluída com sucesso!")
         except Exception as e:
@@ -788,10 +1032,12 @@ def main():
     except Exception as e:
         print(f"\nErro Grave no Fluxo: {e}\n")
         import traceback
+
         traceback.print_exc()
-        
+
     finally:
         print("Execução do deploy.py finalizada.")
+
 
 if __name__ == "__main__":
     main()
