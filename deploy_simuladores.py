@@ -24,6 +24,7 @@ import subprocess
 from pathlib import Path
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
 # =========================================================================
@@ -667,20 +668,18 @@ def print_infra_stats(api_url: str):
     try:
         region = config["AWS_REGION"]
         table_name = "DijkfoodOrders"  # Nome padrão
-        dynamo_client = boto3.client("dynamodb", region_name=region)
+        dynamodb = boto3.resource("dynamodb", region_name=region)
+        table = dynamodb.Table(table_name)
 
         total = 0
         scan_kwargs = {
-            "TableName": table_name,
             "Select": "COUNT",
-            "FilterExpression": "begins_with(PK, :d) AND SK = :m",
-            "ExpressionAttributeValues": {
-                ":d": {"S": "DRIVER#"},
-                ":m": {"S": "METADATA"},
-            },
+            "FilterExpression": Attr("PK").begins_with("DRIVER#")
+            & Attr("SK").eq("LATEST")
+            & Attr("status").eq("LIVRE"),
         }
         while True:
-            resp = dynamo_client.scan(**scan_kwargs)
+            resp = table.scan(**scan_kwargs)
             total += resp.get("Count", 0)
             last_key = resp.get("LastEvaluatedKey")
             if not last_key:
