@@ -1,8 +1,10 @@
+import argparse
 import json
 import re
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import boto3
 # Configurações de Caminhos
 ROOT_DIR = Path(__file__).resolve().parent
 DEPLOY_OUTPUT_PATH = ROOT_DIR / "deploy_output.json"
+SIMULATOR_OUTPUT_PATH = ROOT_DIR / "simulador_ecs" / "simulador_output.json"
 SIM_CONFIG_PATH = ROOT_DIR / "simulador_ecs" / "config.json"
 BENCHMARK_RESULTS_PATH = ROOT_DIR / "benchmark_results.json"
 
@@ -20,8 +23,11 @@ with open(SIM_CONFIG_PATH, "r") as f:
 
 AWS_REGION = sim_config_data["AWS_REGION"]
 CLUSTER_SIM = sim_config_data["CLUSTER_NAME"]
+CLUSTER_MAIN = sim_config_data.get("MAIN_CLUSTER_NAME", "dijkfood-cluster")
 LOG_GROUP_SIM = sim_config_data["LOG_GROUP_NAME"]
+GENERAL_API_INFO = sim_config_data["SIMULATORS"]["general_api"]
 SIM_CLIENTES_INFO = sim_config_data["SIMULATORS"]["sim_pedidos"]
+MAIN_SERVICES = sim_config_data.get("MAIN_SERVICES", {})
 
 # Clientes Boto3
 ecs = boto3.client("ecs", region_name=AWS_REGION)
@@ -33,6 +39,53 @@ def run_command(cmd, description):
     print(f"Executando: {' '.join(cmd)}")
     result = subprocess.run(cmd, check=True)
     return result
+
+
+def load_json_file(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def artifacts_ready() -> bool:
+    deploy_data = load_json_file(DEPLOY_OUTPUT_PATH)
+    sim_data = load_json_file(SIMULATOR_OUTPUT_PATH)
+
+    required_deploy_keys = {
+        "API_URL",
+        "ALB_DNS",
+        "SG_ID",
+        "VPC_ID",
+        "SUBNET_IDS",
+    }
+    required_sim_keys = {
+        "CLUSTER_NAME",
+        "SG_ID",
+        "VPC_ID",
+        "SUBNET_IDS",
+        "SIM_ALB_DNS",
+        "SIM_ALB_URL",
+        "SIMULATORS",
+    }
+
+    return required_deploy_keys.issubset(
+        deploy_data
+    ) and required_sim_keys.issubset(sim_data)
+
+
+def ensure_deployment(force: bool = False):
+    if not force and artifacts_ready():
+        print(
+            "\n>>> Artefatos de deploy já disponíveis. Reutilizando ambiente existente."
+        )
+        return
+
+    run_command(
+        [sys.executable, "deploy.py"],
+        "Deploy completo da infraestrutura e dos simuladores",
+    )
 
 
 def update_sim_rate(new_rate):
@@ -95,98 +148,274 @@ def update_sim_rate(new_rate):
     print(f"Serviço {svc_name} atualizado com nova TD (Rate={new_rate}).")
 
 
+def fetch_logs(
+    log_group_name, stream_prefix, limit_streams=10, limit_events=100
+):
+    """Busca logs do CloudWatch filtrados por prefixo de stream."""
+    response = logs.describe_log_streams(
+        logGroupName=log_group_name,
+        logStreamNamePrefix=stream_prefix,
+    )
+
+    streams = response.get("logStreams", [])
+    if not streams:
+        return None
+
+    streams.sort(key=lambda x: x.get("lastEventTimestamp", 0), reverse=True)
+    streams = streams[:limit_streams]
+
+    all_logs = []
+    for stream in streams:
+        events_resp = logs.get_log_events(
+            logGroupName=log_group_name,
+            logStreamName=stream["logStreamName"],
+            limit=limit_events,
+            startFromHead=False,
+        )
+        all_logs.append(
+            {
+                "stream": stream["logStreamName"],
+                "events": events_resp.get("events", []),
+            }
+        )
+
+    return all_logs
+
+
+def collect_log_events(
+    log_group_name, stream_prefix, limit_streams=10, limit_events=200
+):
+    """Busca eventos recentes em streams com o prefixo informado."""
+    try:
+        return fetch_logs(
+            log_group_name,
+            stream_prefix,
+            limit_streams=limit_streams,
+            limit_events=limit_events,
+        )
+    except Exception as e:
+        print(f"Erro ao buscar logs de {stream_prefix}: {e}")
+        return None
+
+
+def _percentile(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+
+    rank = (len(ordered) - 1) * (percentile / 100.0)
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = rank - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _empty_stats():
+    return {"durations_ms": [], "total": 0, "failures": 0}
+
+
+def _finalize_stats(stats):
+    durations = stats["durations_ms"]
+    total = stats["total"]
+    failures = stats["failures"]
+    return {
+        "count": total,
+        "avg_ms": sum(durations) / len(durations) if durations else None,
+        "p95_ms": _percentile(durations, 95),
+        "failures": failures,
+        "failure_rate": (failures / total) if total else 0.0,
+    }
+
+
+def _parse_general_api_logs(logs_data, start_time_ms):
+    aggregate = _empty_stats()
+    by_endpoint = defaultdict(_empty_stats)
+    by_checkout_step = defaultdict(_empty_stats)
+    by_downstream_service = defaultdict(_empty_stats)
+
+    api_request_re = re.compile(
+        r"api_request method=(\S+) path=(\S+) status=(\d+) duration_ms=([\d.]+)"
+    )
+    checkout_step_re = re.compile(
+        r"checkout_step trace=(\S+) step=(\S+) status=(\S+) duration_ms=([\d.]+)"
+    )
+    downstream_call_re = re.compile(
+        r"downstream_call service=(\S+) method=(\S+) url=(\S+) status=(\S+|error) duration_ms=([\d.]+)"
+    )
+
+    for log_entry in logs_data or []:
+        for ev in log_entry.get("events", []):
+            if ev.get("timestamp", 0) < start_time_ms:
+                continue
+
+            msg = ev.get("message", "")
+
+            match = api_request_re.search(msg)
+            if match:
+                method = match.group(1)
+                path = match.group(2)
+                status = int(match.group(3))
+                duration_ms = float(match.group(4))
+                _update_stats(aggregate, duration_ms, status)
+                _update_stats(
+                    by_endpoint[f"{method} {path}"], duration_ms, status
+                )
+                continue
+
+            match = checkout_step_re.search(msg)
+            if match:
+                step = match.group(2)
+                status = match.group(3)
+                duration_ms = float(match.group(4))
+                _update_stats(
+                    by_checkout_step[step],
+                    duration_ms,
+                    500 if status != "ok" else 200,
+                )
+                continue
+
+            match = downstream_call_re.search(msg)
+            if match:
+                service = match.group(1)
+                status = match.group(4)
+                duration_ms = float(match.group(5))
+                http_status = 500 if status == "error" else int(status)
+                _update_stats(
+                    by_downstream_service[service], duration_ms, http_status
+                )
+
+    return {
+        "aggregate": _finalize_stats(aggregate),
+        "by_endpoint": {k: _finalize_stats(v) for k, v in by_endpoint.items()},
+        "by_checkout_step": {
+            k: _finalize_stats(v) for k, v in by_checkout_step.items()
+        },
+        "by_downstream_service": {
+            k: _finalize_stats(v) for k, v in by_downstream_service.items()
+        },
+    }
+
+
+def _update_stats(stats, duration_ms, status_code):
+    stats["durations_ms"].append(duration_ms)
+    stats["total"] += 1
+    if status_code >= 400:
+        stats["failures"] += 1
+
+
+def _parse_simulator_metrics(logs_data, start_time_ms):
+    result = _empty_stats()
+    metrics_re = re.compile(
+        r"\[METRICS\] P95=(\d+)ms Avg=(\d+)ms \| Rate=(\d+(?:\.\d+)?)/s \| Sent=(\d+) Err=(\d+)"
+    )
+    for log_entry in logs_data or []:
+        for ev in log_entry.get("events", []):
+            if ev.get("timestamp", 0) < start_time_ms:
+                continue
+            msg = ev.get("message", "")
+            match = metrics_re.search(msg)
+            if not match:
+                continue
+            p95_ms = float(match.group(1))
+            avg_ms = float(match.group(2))
+            sent = int(match.group(4))
+            err = int(match.group(5))
+            _update_stats(result, p95_ms, 500 if err > 0 else 200)
+            result.setdefault("reported_p95_ms", []).append(p95_ms)
+            result.setdefault("reported_avg_ms", []).append(avg_ms)
+            result.setdefault("sent", 0)
+            result.setdefault("errors", 0)
+            result["sent"] += sent
+            result["errors"] += err
+    return result
+
+
 def get_running_instances():
     """Retorna a contagem de instâncias rodando para todos os serviços nos clusters."""
-    with open(DEPLOY_OUTPUT_PATH, "r") as f:
-        main_out = json.load(f)
+    service_inventory = []
 
-    main_cluster = "dijkfood-cluster"
-    services_main = [
-        "dijkfood-cadastro-svc",
-        "dijkfood-rotas-svc",
-        "dijkfood-pedidos-svc",
-    ]
+    for service_info in MAIN_SERVICES.values():
+        service_name = service_info.get("SERVICE_NAME")
+        if service_name:
+            service_inventory.append((CLUSTER_MAIN, service_name))
 
-    # Coleta todos os simuladores (Gateway, Clientes, Restaurante, Entregadores)
-    services_sim = []
+    # Coleta todos os simuladores do cluster dedicado
     for s_info in sim_config_data["SIMULATORS"].values():
-        if s_info.get("SERVICE_NAME"):
-            services_sim.append(s_info["SERVICE_NAME"])
+        service_name = s_info.get("SERVICE_NAME")
+        if service_name:
+            service_inventory.append((CLUSTER_SIM, service_name))
 
     results = {}
 
-    for svc in services_main:
+    for cluster_name, service_name in service_inventory:
         try:
-            resp = ecs.describe_services(cluster=main_cluster, services=[svc])
-            if resp["services"]:
-                results[svc] = resp["services"][0]["runningCount"]
-        except:
-            results[svc] = 0
-
-    for svc in services_sim:
-        try:
-            resp = ecs.describe_services(cluster=CLUSTER_SIM, services=[svc])
-            if resp["services"]:
-                results[svc] = resp["services"][0]["runningCount"]
-        except:
-            results[svc] = 0
+            resp = ecs.describe_services(
+                cluster=cluster_name, services=[service_name]
+            )
+            services = resp.get("services", [])
+            if services:
+                results[service_name] = services[0].get("runningCount", 0)
+            else:
+                results[service_name] = 0
+        except Exception:
+            results[service_name] = 0
 
     return results
 
 
-def collect_p95_metrics(duration_s=30):
-    """Extrai métricas P95 dos logs do CloudWatch durante uma janela de tempo."""
-    print(f"Coletando métricas P95 por {duration_s} segundos")
+def collect_endpoint_metrics(duration_s=30):
+    """Extrai métricas por endpoint da API geral e do simulador de pedidos."""
+    print(f"Coletando métricas por endpoint por {duration_s} segundos")
     start_time = int(time.time() * 1000)
     time.sleep(duration_s)
 
-    prefix = SIM_CLIENTES_INFO["LOG_STREAM_PREFIX"]
+    general_logs = collect_log_events(
+        LOG_GROUP_SIM,
+        GENERAL_API_INFO["LOG_STREAM_PREFIX"],
+        limit_streams=10,
+        limit_events=200,
+    )
+    simulator_logs = collect_log_events(
+        LOG_GROUP_SIM,
+        SIM_CLIENTES_INFO["LOG_STREAM_PREFIX"],
+        limit_streams=5,
+        limit_events=100,
+    )
 
-    p95_values = []
-    try:
-        streams = logs.describe_log_streams(
-            logGroupName=LOG_GROUP_SIM,
-            logStreamNamePrefix=prefix,
-            orderBy="LastEventTime",
-            descending=True,
-            limit=5,
-        )
+    general_metrics = _parse_general_api_logs(general_logs, start_time)
+    simulator_metrics = _parse_simulator_metrics(simulator_logs, start_time)
 
-        for stream in streams.get("logStreams", []):
-            events = logs.get_log_events(
-                logGroupName=LOG_GROUP_SIM,
-                logStreamName=stream["logStreamName"],
-                startTime=start_time,
-                limit=100,
-            )
-            for ev in events.get("events", []):
-                msg = ev["message"]
-                match = re.search(r"P95=(\d+)ms", msg)
-                if match:
-                    p95_values.append(int(match.group(1)))
-    except Exception as e:
-        print(f"Erro ao ler logs: {e}")
+    checkout_metrics = general_metrics["by_endpoint"].get("POST /checkout")
 
-    if p95_values:
-        return sum(p95_values) / len(p95_values)
-    return None
+    return {
+        "aggregate": general_metrics["aggregate"],
+        "checkout": checkout_metrics,
+        "by_endpoint": general_metrics["by_endpoint"],
+        "checkout_steps": general_metrics["by_checkout_step"],
+        "downstream_services": general_metrics["by_downstream_service"],
+        "simulator_metrics": simulator_metrics,
+    }
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Executa benchmark dos simuladores DijkFood"
+    )
+    parser.add_argument(
+        "--force-deploy",
+        action="store_true",
+        help="Força o redeploy completo antes do benchmark",
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
     print("INICIANDO BENCHMARK AUTOMATIZADO DIJKFOOD")
     print("=" * 60)
 
-    # 1. Deploy Inicial
-    run_command(
-        [sys.executable, "deploy.py"], "Deploy da Infraestrutura Principal"
-    )
-
-    # 2. Deploy Simuladores
-    run_command(
-        [sys.executable, "simulador_ecs/deploy_simulador.py"],
-        "Deploy dos Simuladores",
-    )
+    # 1. Reutiliza o ambiente quando já houver artefatos válidos.
+    ensure_deployment(force=args.force_deploy)
 
     scenarios = [10, 50, 200]
     final_results = []
@@ -208,19 +437,27 @@ def main():
         # Medir instâncias
         instances = get_running_instances()
 
-        # Medir latência (Requirement: "API deve responder em menos de 500ms no percentil 95")
-        p95_avg = collect_p95_metrics(30)
+        # Medir desempenho por endpoint da API geral
+        request_metrics = collect_endpoint_metrics(30)
 
         result = {
             "scenario_rate_per_sec": rate,
-            "latency_p95_ms": round(p95_avg, 2) if p95_avg else "N/A",
+            "request_metrics": request_metrics,
             "instances": instances,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         final_results.append(result)
 
+        aggregate = (
+            request_metrics.get("aggregate", {}) if request_metrics else {}
+        )
+        agg_p95 = aggregate.get("p95_ms")
+        agg_avg = aggregate.get("avg_ms")
         print(
-            f"Resultado Cenário {rate}: P95={result['latency_p95_ms']}ms, Instâncias={sum(instances.values())}"
+            f"Resultado Cenário {rate}: P95 agregado={agg_p95:.2f}ms, "
+            f"Avg agregado={agg_avg:.2f}ms, Instâncias={sum(instances.values())}"
+            if agg_p95 is not None and agg_avg is not None
+            else f"Resultado Cenário {rate}: Instâncias={sum(instances.values())}"
         )
 
     # Salvar resultados
@@ -236,17 +473,70 @@ def main():
     # Exibir resumo detalhado por serviço
     print("\n" + "=" * 85)
     print(
-        f"{'Cenário (p/s)':<15} | {'P95 Latency':<15} | {'Serviço':<30} | {'Instâncias':<10}"
+        f"{'Cenário (p/s)':<15} | {'Tipo':<14} | {'Alvo':<30} | {'Avg':<10} | {'P95':<10} | {'Falhas':<12}"
     )
     print("-" * 85)
     for r in final_results:
+        request_metrics = r.get("request_metrics", {})
+        aggregate = request_metrics.get("aggregate") or {}
+        checkout = request_metrics.get("checkout") or {}
+        endpoint_metrics = request_metrics.get("by_endpoint", {})
+        checkout_steps = request_metrics.get("checkout_steps", {})
+        downstream_services = request_metrics.get("downstream_services", {})
+        simulator_metrics = request_metrics.get("simulator_metrics", {})
+
         first_line = True
-        for svc, count in r["instances"].items():
+
+        def print_row(row_type: str, target: str, metrics: dict):
             scenario = (
                 f"{r['scenario_rate_per_sec']} p/s" if first_line else ""
             )
-            latency = f"{r['latency_p95_ms']}ms" if first_line else ""
-            print(f"{scenario:<15} | {latency:<15} | {svc:<30} | {count:<10}")
+            avg = (
+                f"{metrics['avg_ms']:.2f}ms"
+                if metrics.get("avg_ms") is not None
+                else "N/A"
+            )
+            p95 = (
+                f"{metrics['p95_ms']:.2f}ms"
+                if metrics.get("p95_ms") is not None
+                else "N/A"
+            )
+            failures = f"{metrics.get('failures', 0)}/{metrics.get('count', 0)} ({metrics.get('failure_rate', 0.0):.1%})"
+            print(
+                f"{scenario:<15} | {row_type:<12} | {target:<28} | {avg:<10} | {p95:<10} | {failures:<12}"
+            )
+
+        if aggregate:
+            print_row("AGREGADO", "TODAS AS REQUISICOES", aggregate)
+            first_line = False
+        if checkout:
+            print_row("PEDIDO", "POST /checkout", checkout)
+            first_line = False
+        for step, metrics in sorted(checkout_steps.items()):
+            print_row("STEP", f"checkout:{step}", metrics)
+            first_line = False
+        for service, metrics in sorted(downstream_services.items()):
+            print_row("DOWNSTREAM", service, metrics)
+            first_line = False
+        if simulator_metrics:
+            sim_avg = simulator_metrics.get("reported_avg_ms") or []
+            sim_p95 = simulator_metrics.get("reported_p95_ms") or []
+            sim_summary = {
+                "avg_ms": sum(sim_avg) / len(sim_avg) if sim_avg else None,
+                "p95_ms": sum(sim_p95) / len(sim_p95) if sim_p95 else None,
+                "count": simulator_metrics.get("sent", 0),
+                "failures": simulator_metrics.get("errors", 0),
+                "failure_rate": (
+                    simulator_metrics.get("errors", 0)
+                    / simulator_metrics.get("sent", 1)
+                ),
+            }
+            print_row("SIMULADOR", "sim_pedidos [METRICS]", sim_summary)
+            first_line = False
+        for endpoint, metrics in sorted(endpoint_metrics.items()):
+            if endpoint == "POST /checkout":
+                continue
+            print_row("ENDPOINT", endpoint, metrics)
             first_line = False
         print("-" * 85)
 
