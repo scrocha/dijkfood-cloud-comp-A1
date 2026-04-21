@@ -1,20 +1,27 @@
 import asyncio
-import random
 import os
-import httpx
-from fastapi import FastAPI, BackgroundTasks
+import random
 from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI
 
 from simulador_restaurante.models import PrepareOrderRequest
 
 # Configurações
 GENERAL_API_URL = os.getenv("GENERAL_API_URL", "http://general-api:8000").rstrip("/")
 
+active_tasks = set()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(timeout=30.0)
     yield
+    if active_tasks:
+        print(f"[Cozinha] Aguardando {len(active_tasks)} preparos finalizarem...")
+        await asyncio.gather(*active_tasks, return_exceptions=True)
     await app.state.http.aclose()
+
 
 app = FastAPI(title="DijkFood - Simulador de Restaurante", lifespan=lifespan)
 
@@ -52,15 +59,18 @@ async def _processar_preparo(
         print(f"[Cozinha] Falha na comunicação com API Geral: {e}")
 
 @app.post("/simulador/restaurante/prepare")
-async def prepare_order(req: PrepareOrderRequest, background_tasks: BackgroundTasks):
+async def prepare_order(req: PrepareOrderRequest):
     """Endpoint passivo chamado pela API Geral para iniciar o preparo"""
-    background_tasks.add_task(
-        _processar_preparo,
-        req.order_id,
-        req.restaurant_id,
-        req.driver_id,
-        req.route_to_client,
+    task = asyncio.create_task(
+        _processar_preparo(
+            req.order_id,
+            req.restaurant_id,
+            req.driver_id,
+            req.route_to_client,
+        )
     )
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
     return {"status": "preparing", "order_id": req.order_id}
 
 @app.get("/health")

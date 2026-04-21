@@ -47,9 +47,14 @@ async def lifespan(app: FastAPI):
         print(f"[Simulador] Auto-start ativado: rate={DEFAULT_RATE} pedidos/segundo")
     yield
     sim_state.is_running = False
+    print("[Simulador] Shutdown iniciado, parando geração de novos pedidos")
     if sim_state.task:
-        sim_state.task.cancel()
+        try:
+            await asyncio.wait_for(sim_state.task, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            sim_state.task.cancel()
     await sim_state.http_client.aclose()
+    print("[Simulador] Shutdown finalizado.")
 
 
 app = FastAPI(
