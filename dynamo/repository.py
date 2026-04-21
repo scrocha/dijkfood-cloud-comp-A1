@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import boto3
 import httpx
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from .models import (
@@ -415,13 +415,49 @@ class LocationRepository:
             "Limit": limit,
         }
         response = self.table.query(**query_kwargs)
-        items = response.get("Items", [])
-        for item in items:
-            if "lat" in item:
-                item["lat"] = float(item["lat"])
-            if "lng" in item:
-                item["lng"] = float(item["lng"])
-        return items
+        return [
+            self._normalize_driver_item(item)
+            for item in response.get("Items", [])
+        ]
+
+    def _scan_legacy_free_drivers(self, limit: int):
+        response = self.table.scan(
+            FilterExpression=Attr("PK").begins_with("DRIVER#")
+            & Attr("status").eq(DriverStatus.LIVRE.value),
+            Limit=limit,
+        )
+        return [
+            self._normalize_driver_item(item)
+            for item in response.get("Items", [])
+        ]
+
+    def _normalize_driver_item(self, item: dict):
+        normalized = dict(item)
+        if "lat" not in normalized and "last_lat" in normalized:
+            normalized["lat"] = normalized["last_lat"]
+        if "lng" not in normalized and "last_lng" in normalized:
+            normalized["lng"] = normalized["last_lng"]
+        if "driver_id" not in normalized:
+            normalized["driver_id"] = (
+                normalized.get("entregador_id")
+                or normalized.get("id")
+                or normalized.get("PK", "").replace("DRIVER#", "")
+            )
+        if "lat" in normalized:
+            normalized["lat"] = float(normalized["lat"])
+        if "lng" in normalized:
+            normalized["lng"] = float(normalized["lng"])
+        return normalized
+
+    def _convert_floats(self, obj):
+        """Converte recursivamente floats para Decimal antes de gravar no DynamoDB."""
+        if isinstance(obj, list):
+            return [self._convert_floats(i) for i in obj]
+        if isinstance(obj, dict):
+            return {k: self._convert_floats(v) for k, v in obj.items()}
+        if isinstance(obj, float):
+            return Decimal(str(obj))
+        return obj
 
     def _cache_key(self, limit: int) -> dict:
         return {"PK": f"{self.CACHE_PREFIX}#{limit}", "SK": "METADATA"}
@@ -487,10 +523,12 @@ class LocationRepository:
 
         try:
             drivers = self._query_free_drivers(limit)
+            if not drivers:
+                drivers = self._scan_legacy_free_drivers(limit)
             self.table.put_item(
                 Item={
                     **cache_key,
-                    "drivers": drivers,
+                    "drivers": self._convert_floats(drivers),
                     "expires_at": int(time.time()) + cache_ttl_seconds,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }

@@ -136,15 +136,17 @@ def seed_drivers_from_rds():
 
     with table.batch_writer() as batch:
         for d in drivers:
-            # Estrutura baseada no repository.py: PK=DRIVER#id, SK=METADATA
+            # Estrutura compatível com o repository.py: PK=DRIVER#id, SK=LATEST
             item = {
                 "PK": f"DRIVER#{d['entregador_id']}",
-                "SK": "METADATA",
+                "SK": "LATEST",
                 "driver_id": d["entregador_id"],
                 "nome": d["nome"],
                 "status": "LIVRE",
-                "last_lat": Decimal(str(d["endereco_latitude"])),
-                "last_lng": Decimal(str(d["endereco_longitude"])),
+                "lat": Decimal(str(d["endereco_latitude"])),
+                "lng": Decimal(str(d["endereco_longitude"])),
+                "GSI2PK": "DRIVER_STATUS#LIVRE",
+                "GSI2SK": d["entregador_id"],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             batch.put_item(Item=item)
