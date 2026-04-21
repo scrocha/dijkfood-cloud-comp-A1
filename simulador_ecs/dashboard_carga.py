@@ -193,16 +193,36 @@ def scale_service(service_name: str, task_family: str, desired_count: int):
 
 
 def update_service_rate(
-    service_name: str, task_family: str, container_name: str, new_rate: float
+    service_name: str, task_family: str, container_name: str, new_rate: float, sim_alb_url: str = ""
 ):
-    """Atualiza o RATE no task definition e força novo deploy do service."""
+    """Atualiza o RATE dinamicamente via HTTP e persistentemente no Task Definition."""
+    dynamic_ok = False
+    
+    # 1. Tentar atualização dinâmica via HTTP (instântaneo e sem subir nova task)
+    if sim_alb_url:
+        try:
+            url = f"{sim_alb_url.rstrip('/')}/simulador/cliente/start"
+            data = json.dumps({"rate": float(new_rate)}).encode('utf-8')
+            req = urllib.request.Request(
+                url, data=data, 
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if resp.status == 200:
+                    dynamic_ok = True
+                    st.toast(f"⚡ Rate atualizado dinamicamente: {new_rate}/s", icon="🚀")
+        except Exception as e:
+            # Silencioso, pois o service pode estar offline
+            pass
+
     try:
-        # 1. Buscar task definition atual
+        # 2. Buscar task definition atual para persistência
         td = ecs_client.describe_task_definition(taskDefinition=task_family)[
             "taskDefinition"
         ]
 
-        # 2. Atualizar env vars RATE e AUTO_START no container
+        # 3. Atualizar env vars RATE e AUTO_START no container (para novos restarts)
         for container in td["containerDefinitions"]:
             if container["name"] == container_name:
                 env_list = container.get("environment", [])
@@ -213,7 +233,7 @@ def update_service_rate(
                     {"name": k, "value": v} for k, v in env_dict.items()
                 ]
 
-        # 3. Registrar nova revisão da task definition
+        # 4. Registrar nova revisão da task definition
         ecs_client.register_task_definition(
             family=task_family,
             networkMode=td["networkMode"],
@@ -225,12 +245,15 @@ def update_service_rate(
             containerDefinitions=td["containerDefinitions"],
         )
 
-        # 4. Forçar novo deploy do service
+        # 5. Atualizar o service com a nova TD.
+        # Se a atualização dinâmica falhou (ex: service parado), forçamos deploy.
+        # Se funcionou, apenas atualizamos a TD do service sem matar a task atual (evita soma de rates).
+        force = not dynamic_ok
         ecs_client.update_service(
             cluster=CLUSTER_NAME,
             service=service_name,
             taskDefinition=task_family,
-            forceNewDeployment=True,
+            forceNewDeployment=force,
         )
         return True
     except Exception as e:
@@ -787,6 +810,7 @@ with tab_control:
                         sim_pedidos_config["TASK_FAMILY"],
                         sim_pedidos_config["CONTAINER_NAME"],
                         rate_val,
+                        sim_alb_url=sim_alb_url,
                     )
                     if ok:
                         # Garante que o serviço está rodando com pelo menos 1 instância
@@ -818,6 +842,7 @@ with tab_control:
                     sim_pedidos_config["TASK_FAMILY"],
                     sim_pedidos_config["CONTAINER_NAME"],
                     custom_rate,
+                    sim_alb_url=sim_alb_url,
                 )
                 if ok:
                     svc = get_service_info(sim_pedidos_config["SERVICE_NAME"])

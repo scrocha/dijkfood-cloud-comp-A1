@@ -151,13 +151,28 @@ def delete_rds_instance():
     except Exception as e:
         print(f"Erro ao deletar RDS: {e}")
 
-def delete_ecr_repos():
-    print("--- Removendo Repositórios ECR (HARD) ---")
-    for repo in REPO_NAMES:
+def delete_ecr_repos(hard=False):
+    """
+    Deleta os repositórios ECR.
+    No modo SOFT (padrão), os repositórios são preservados.
+    No modo HARD, todos os repositórios (APIs e Simuladores) são removidos.
+    """
+    if not hard:
+        print("--- ModoLITE: Preservando Repositórios ECR ---")
+        return
+        
+    print("--- Removendo TODOS os Repositórios ECR (HARD) ---")
+    all_repos = REPO_NAMES + SIM_REPO_NAMES
+    for repo in all_repos:
         try:
+            # Verifica se o repositório existe antes de tentar deletar
+            ecr.describe_repositories(repositoryNames=[repo])
             ecr.delete_repository(repositoryName=repo, force=True)
-            print(f"Repositório {repo} deletado.")
-        except Exception: pass
+            print(f"  Repositório {repo} deletado.")
+        except ecr.exceptions.RepositoryNotFoundException:
+            pass
+        except Exception as e:
+            print(f"  Erro ao deletar repo {repo}: {e}")
 
 def delete_security_group():
     print("--- Removendo Security Group (HARD) ---")
@@ -238,13 +253,6 @@ def delete_simulator_resources():
         print(f"  Cluster {SIM_CLUSTER_NAME} deletado.")
     except Exception: pass
 
-    # ECR Repos
-    for repo in SIM_REPO_NAMES:
-        try:
-            ecr.delete_repository(repositoryName=repo, force=True)
-            print(f"  ECR {repo} deletado.")
-        except Exception: pass
-
     # Log Group
     try:
         logs.delete_log_group(logGroupName=SIM_LOG_GROUP)
@@ -288,10 +296,12 @@ def main():
     delete_load_balancer()
     delete_logs()
     delete_dynamo()
+    
+    # Gerencia ECR baseado no modo
+    delete_ecr_repos(hard=args.hard)
 
     if args.hard:
         delete_rds_instance()
-        delete_ecr_repos()
         delete_security_group()
     else:
         clear_rds_data()
