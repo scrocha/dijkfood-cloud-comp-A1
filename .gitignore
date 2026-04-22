@@ -216,3 +216,7 @@ alb_endpoints.json
 
 artifacts/carga*
 GEMINI.md
+
+# Outputs gerados pelos scripts de deploy
+deploy_output.json
+simuladores/simulador_ecs/simulador_output.json

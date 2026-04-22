@@ -1,68 +1,67 @@
-# DijkFood - Sistema de Logística de Entrega Cloud Native
+# DijkFood — Cloud Computing A1
 
-Este projeto é uma plataforma de entrega de comida ("DijkFood") projetada para alta escalabilidade na AWS, utilizando uma arquitetura de microserviços, bancos de dados poliglotas (Relacional e NoSQL) e computação serverless com ECS Fargate.
+Sistema de delivery de comida baseado em cloud, desenvolvido como trabalho acadêmico da disciplina de Computação em Nuvem. A infraestrutura roda inteiramente na AWS com ECS Fargate, RDS PostgreSQL e DynamoDB.
 
-## Arquitetura e Serviços
+## Pré-requisitos
 
-O sistema é dividido em três serviços principais:
+- [uv](https://docs.astral.sh/uv/) instalado
+- AWS CLI configurado com credenciais válidas (`aws configure`)
+- Docker (para rodar localmente)
 
-1.  **`database_service` (PostgreSQL/RDS):** Gerencia as entidades estáticas (Usuários, Restaurantes, Entregadores, Produtos) e armazena o histórico consolidado de pedidos finalizados.
-2.  **`route_service` (FastAPI):** Calcula rotas otimizadas utilizando o algoritmo A* sobre o grafo de ruas de São Paulo (OSMNX).
-3.  **`dynamo` (DynamoDB):** Gerencia o ciclo de vida dos pedidos em tempo real. Possui lógica de:
-    *   **Máquina de Estados:** Transições rígidas de status (`CONFIRMED` -> `DELIVERED`).
-    *   **TTL (Time to Live):** Pedidos expiram do DynamoDB 48h após a entrega para manter a tabela leve.
-    *   **Sincronização Automática:** Ao atingir o status `DELIVERED`, o serviço condensa o histórico de tempos e envia para a tabela `PEDIDOS` no PostgreSQL.
+## Como rodar na AWS
 
----
+### Deploy completo
 
-## Como Executar na Nuvem (AWS)
-
-O projeto possui um script de deploy unificado que provisiona toda a infraestrutura (RDS, DynamoDB, ECR, ALB, ECS, Auto Scaling) em uma única execução.
-
-### 1. Deploy Unificado
-A partir da raiz do repositório, execute:
+O script principal faz tudo em sequência: provisiona a infra, sobe os simuladores e roda o benchmark.
 
 ```bash
-uv run python deploy.py
+uv run python infra/deploy.py
 ```
-*Este script retornará a URL do Load Balancer (ALB) ao final.*
 
-### 2. Limpeza de Recursos
-Para evitar custos desnecessários, utilize o script de destruição:
+Ao final, ele imprime a URL do ALB e as instruções para acessar o dashboard.
 
-*   **Modo Soft (Padrão):** Remove containers, Load Balancer e logs, mas **mantém** o RDS e o ECR (limpando apenas os dados das tabelas) para que o próximo deploy seja instantâneo.
-    ```bash
-    uv run python destroy.py
-    ```
+### Deploy em etapas (recomendado)
 
-*   **Modo Hard:** Remove **absolutamente tudo**, incluindo a instância do banco de dados RDS e os repositórios de imagem.
-    ```bash
-    uv run python destroy.py --hard
-    ```
+Você só precisa rodar o deploy uma vez. Nas próximas execuções, basta rodar só o benchmark:
 
----
+```bash
+# Primeira vez: provisiona tudo
+uv run python infra/deploy_infra.py
+uv run python infra/deploy_simuladores.py
 
-## Como Executar Localmente (Docker Compose)
+# Próximas vezes: só roda os testes
+uv run python infra/run_benchmark.py
+```
 
-Para desenvolvimento rápido, você pode subir toda a infraestrutura localmente:
+### Aviso: tempo de estabilização
+
+O sistema demora para ficar estável após o provisionamento. O benchmark roda 5 minutos por cenário de carga justamente por isso — nos primeiros ~40 segundos as métricas vão estar ruins enquanto o ECS provisiona as primeiras tasks e o auto scaling ainda não reagiu. Os resultados válidos são os coletados após esse aquecimento.
+
+### Destruir infraestrutura
+
+```bash
+# Soft (padrão): remove containers, ALB e logs. Mantém RDS e ECR para o próximo deploy ser mais rápido.
+uv run python infra/destroy.py
+
+# Hard: remove absolutamente tudo, incluindo RDS e repositórios de imagem.
+uv run python infra/destroy.py --hard
+```
+
+## Como rodar localmente
 
 ```bash
 docker-compose up --build
 ```
 
-Os serviços estarão disponíveis em:
-- **Cadastro (SQL):** `http://localhost:8002`
-- **Rotas:** `http://localhost:8003`
-- **Pedidos (Dynamo):** `http://localhost:8004`
-- **DynamoDB Admin:** `http://localhost:8001` (Interface visual para o DynamoLocal)
+Serviços disponíveis:
 
----
+| Serviço | URL |
+|---|---|
+| Cadastro (SQL) | http://localhost:8002 |
+| Rotas | http://localhost:8003 |
+| Pedidos (Dynamo) | http://localhost:8004 |
+| DynamoDB Admin UI | http://localhost:8001 |
 
-## Estrutura do Projeto
+## Autores
 
-- `/database`: DDL, API de cadastro e simuladores para PostgreSQL.
-- `/dynamo`: Lógica do serviço de pedidos e integração com DynamoDB.
-- `/route_service`: Motor de cálculo de rotas e processamento de grafos.
-- `deploy.py`: Orquestrador de infraestrutura AWS (Boto3).
-- `aleat/test_infra.py`: Script de validação funcional e de conectividade.
-- `destroy.py`: Gerenciador de limpeza de ambiente.
+Gustavo Tironi, Kauan Mariani Ferreira, Matheus Fillype Ferreira de Carvalho, Sillas Rocha da Costa
