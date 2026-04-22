@@ -1,4 +1,4 @@
-# DijkFood — Cloud Computing A1
+# DijkFood — Computação em Nuvem
 
 Sistema de delivery de comida baseado em cloud, desenvolvido como trabalho acadêmico da disciplina de Computação em Nuvem. A infraestrutura roda inteiramente na AWS com ECS Fargate, RDS PostgreSQL e DynamoDB.
 
@@ -12,7 +12,7 @@ Sistema de delivery de comida baseado em cloud, desenvolvido como trabalho acad�
 
 ### Deploy completo
 
-O script principal faz tudo em sequência: provisiona a infra, sobe os simuladores e roda o benchmark.
+O script principal faz tudo em sequência: provisiona a infraestrutura, sobe os simuladores e roda o benchmark.
 
 ```bash
 uv run python infra/deploy.py
@@ -52,15 +52,6 @@ uv run python infra/destroy.py --hard
 ```bash
 docker-compose up --build
 ```
-
-Serviços disponíveis:
-
-| Serviço | URL |
-|---|---|
-| Cadastro (SQL) | http://localhost:8002 |
-| Rotas | http://localhost:8003 |
-| Pedidos (Dynamo) | http://localhost:8004 |
-| DynamoDB Admin UI | http://localhost:8001 |
 
 ## Autores
 
