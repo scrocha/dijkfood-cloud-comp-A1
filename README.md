@@ -44,7 +44,7 @@ uv run python infra/run_benchmark.py
 
 ### Aviso: tempo de estabilização
 
-O sistema demora para ficar estável após o provisionamento. O benchmark roda 5 minutos por cenário de carga — nos primeiros ~40 segundos as métricas vão estar ruins enquanto o ECS provisiona as primeiras tasks e o auto scaling ainda não reagiu. Os resultados válidos são os coletados após esse aquecimento.
+O sistema demora para ficar estável após o provisionamento. O benchmark roda 5 minutos por cenário de carga e por isso nos primeiros ~40 segundos as métricas vão estar ruins enquanto o ECS provisiona as primeiras tasks e o auto scaling ainda não reagiu. Os resultados válidos são os coletados após esse aquecimento.
 
 ### Destruir infraestrutura
 
