@@ -8,6 +8,15 @@ Sistema de delivery de comida baseado em cloud, desenvolvido como trabalho acad�
 - AWS CLI configurado com credenciais válidas (`aws configure`)
 - Docker (para rodar localmente)
 
+## Infraestrutura AWS
+
+- **ECS Fargate** — 3 serviços (cadastro, rotas, pedidos) com auto scaling 2–10 tasks por serviço
+- **RDS PostgreSQL 15** — banco relacional (db.t4g.small, 20 GB gp3)
+- **DynamoDB** — estado dos pedidos e localização dos entregadores
+- **ALB** — load balancer para os serviços e simuladores
+- **ECR** — registry das imagens Docker
+- **CloudWatch** — logs e métricas
+
 ## Como rodar na AWS
 
 ### Deploy completo
@@ -35,7 +44,7 @@ uv run python infra/run_benchmark.py
 
 ### Aviso: tempo de estabilização
 
-O sistema demora para ficar estável após o provisionamento. O benchmark roda 5 minutos por cenário de carga justamente por isso — nos primeiros ~40 segundos as métricas vão estar ruins enquanto o ECS provisiona as primeiras tasks e o auto scaling ainda não reagiu. Os resultados válidos são os coletados após esse aquecimento.
+O sistema demora para ficar estável após o provisionamento. O benchmark roda 5 minutos por cenário de carga — nos primeiros ~40 segundos as métricas vão estar ruins enquanto o ECS provisiona as primeiras tasks e o auto scaling ainda não reagiu. Os resultados válidos são os coletados após esse aquecimento.
 
 ### Destruir infraestrutura
 
